@@ -1,4 +1,4 @@
-name: PullRequestSnapshot
+name: SnapshotPR
 on:
   workflow_run:
     workflows:
@@ -6,7 +6,7 @@ on:
     types:
       - completed
 jobs:
-  release:
+  snapshot:
     permissions:
       id-token: write
       pull-requests: write
@@ -50,13 +50,13 @@ jobs:
             ~~~
             aws ecr get-login-password --region ${process.env.SNAPSHOT_REGION} | docker login --username AWS --password-stdin ${process.env.SNAPSHOT_ACCOUNT_ID}.dkr.ecr.${process.env.SNAPSHOT_REGION}.amazonaws.com
             
-            helm upgrade --install karpenter oci://${process.env.SNAPSHOT_ACCOUNT_ID}.dkr.ecr.${process.env.SNAPSHOT_REGION}.amazonaws.com/karpenter/snapshot --version "0-${process.env.PR_COMMIT}" --namespace "kube-system" --create-namespace \
-              --set "settings.clusterName=${CLUSTER_NAME}" \
-              --set "settings.interruptionQueue=${CLUSTER_NAME}" \
-              --set controller.resources.requests.cpu=1 \
-              --set controller.resources.requests.memory=1Gi \
-              --set controller.resources.limits.cpu=1 \
-              --set controller.resources.limits.memory=1Gi \
+            helm upgrade --install karpenter oci://${process.env.SNAPSHOT_ACCOUNT_ID}.dkr.ecr.${process.env.SNAPSHOT_REGION}.amazonaws.com/karpenter/snapshot --version "0-${process.env.PR_COMMIT}" --namespace "kube-system" --create-namespace \\
+              --set "settings.clusterName=\${CLUSTER_NAME}" \\
+              --set "settings.interruptionQueue=\${CLUSTER_NAME}" \\
+              --set controller.resources.requests.cpu=1 \\
+              --set controller.resources.requests.memory=1Gi \\
+              --set controller.resources.limits.cpu=1 \\
+              --set controller.resources.limits.memory=1Gi \\
               --wait
             ~~~
             `
