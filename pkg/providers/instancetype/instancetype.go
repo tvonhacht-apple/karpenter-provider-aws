@@ -20,7 +20,6 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/mitchellh/hashstructure/v2"
 	"github.com/patrickmn/go-cache"
@@ -43,6 +42,7 @@ import (
 
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/utils/pretty"
+	"sigs.k8s.io/karpenter/pkg/utils/resources"
 )
 
 const (
@@ -98,9 +98,6 @@ func (p *Provider) List(ctx context.Context, kc *corev1beta1.KubeletConfiguratio
 	if err != nil {
 		return nil, err
 	}
-	// Get zones from instancetypeOfferings
-	zones := p.getZones(ctx, instanceTypeOfferings)
-	// Constrain zones from subnets
 	subnets, err := p.subnetProvider.List(ctx, nodeClass)
 	if err != nil {
 		return nil, err
@@ -110,24 +107,59 @@ func (p *Provider) List(ctx context.Context, kc *corev1beta1.KubeletConfiguratio
 	})...)
 
 	// Compute fully initialized instance types hash key
-	subnetHash, _ := hashstructure.Hash(subnets, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
+	subnetZonesHash, _ := hashstructure.Hash(subnetZones, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
 	kcHash, _ := hashstructure.Hash(kc, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
+	// TODO: remove kubeReservedHash and systemReservedHash once v1.ResourceList objects are hashed as strings in KubeletConfiguration
+	// For more information on the v1.ResourceList hash issue: https://github.com/kubernetes-sigs/karpenter/issues/1080
+	kubeReservedHash, systemReservedHash := uint64(0), uint64(0)
+	if kc != nil {
+		kubeReservedHash, _ = hashstructure.Hash(resources.StringMap(kc.KubeReserved), hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
+		systemReservedHash, _ = hashstructure.Hash(resources.StringMap(kc.SystemReserved), hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
+	}
 	blockDeviceMappingsHash, _ := hashstructure.Hash(nodeClass.Spec.BlockDeviceMappings, hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
-	key := fmt.Sprintf("%d-%d-%d-%016x-%016x-%016x-%s", p.instanceTypesSeqNum, p.instanceTypeOfferingsSeqNum, p.unavailableOfferings.SeqNum, subnetHash, kcHash, blockDeviceMappingsHash, aws.StringValue(nodeClass.Spec.AMIFamily))
+	// TODO: remove volumeSizeHash once resource.Quantity objects get hashed as a string in BlockDeviceMappings
+	// For more information on the resource.Quantity hash issue: https://github.com/aws/karpenter-provider-aws/issues/5447
+	volumeSizeHash, _ := hashstructure.Hash(lo.Reduce(nodeClass.Spec.BlockDeviceMappings, func(agg string, block *v1beta1.BlockDeviceMapping, _ int) string {
+		return fmt.Sprintf("%s/%s", agg, block.EBS.VolumeSize)
+	}, ""), hashstructure.FormatV2, &hashstructure.HashOptions{SlicesAsSets: true})
+	key := fmt.Sprintf("%d-%d-%d-%016x-%016x-%016x-%s-%s-%016x-%016x-%016x",
+		p.instanceTypesSeqNum,
+		p.instanceTypeOfferingsSeqNum,
+		p.unavailableOfferings.SeqNum,
+		subnetZonesHash,
+		kcHash,
+		blockDeviceMappingsHash,
+		aws.StringValue((*string)(nodeClass.Spec.InstanceStorePolicy)),
+		aws.StringValue(nodeClass.Spec.AMIFamily),
+		volumeSizeHash,
+		kubeReservedHash,
+		systemReservedHash,
+	)
 	if item, ok := p.cache.Get(key); ok {
 		return item.([]*cloudprovider.InstanceType), nil
 	}
-	result := lo.Map(instanceTypes, func(i *ec2.InstanceTypeInfo, _ int) *cloudprovider.InstanceType {
-		return NewInstanceType(ctx, i, kc, p.region, nodeClass, p.createOfferings(ctx, i, instanceTypeOfferings[aws.StringValue(i.InstanceType)], zones, subnetZones))
-	})
-	for _, instanceType := range instanceTypes {
-		InstanceTypeVCPU.With(prometheus.Labels{
-			InstanceTypeLabel: *instanceType.InstanceType,
-		}).Set(float64(aws.Int64Value(instanceType.VCpuInfo.DefaultVCpus)))
-		InstanceTypeMemory.With(prometheus.Labels{
-			InstanceTypeLabel: *instanceType.InstanceType,
-		}).Set(float64(aws.Int64Value(instanceType.MemoryInfo.SizeInMiB) * 1024 * 1024))
+
+	// Get all zones across all offerings
+	// We don't use this in the cache key since this is produced from our instanceTypeOfferings which we do cache
+	allZones := sets.New[string]()
+	for _, offeringZones := range instanceTypeOfferings {
+		for zone := range offeringZones {
+			allZones.Insert(zone)
+		}
 	}
+	if p.cm.HasChanged("zones", allZones) {
+		logging.FromContext(ctx).With("zones", allZones.UnsortedList()).Debugf("discovered zones")
+	}
+	result := lo.Map(instanceTypes, func(i *ec2.InstanceTypeInfo, _ int) *cloudprovider.InstanceType {
+		instanceTypeVCPU.With(prometheus.Labels{
+			instanceTypeLabel: *i.InstanceType,
+		}).Set(float64(aws.Int64Value(i.VCpuInfo.DefaultVCpus)))
+		instanceTypeMemory.With(prometheus.Labels{
+			instanceTypeLabel: *i.InstanceType,
+		}).Set(float64(aws.Int64Value(i.MemoryInfo.SizeInMiB) * 1024 * 1024))
+
+		return NewInstanceType(ctx, i, kc, p.region, nodeClass, p.createOfferings(ctx, i, instanceTypeOfferings[aws.StringValue(i.InstanceType)], allZones, subnetZones))
+	})
 	p.cache.SetDefault(key, result)
 	return result, nil
 }
@@ -167,33 +199,19 @@ func (p *Provider) createOfferings(ctx context.Context, instanceType *ec2.Instan
 				Price:        price,
 				Available:    available,
 			})
+			instanceTypeOfferingAvailable.With(prometheus.Labels{
+				instanceTypeLabel: *instanceType.InstanceType,
+				capacityTypeLabel: capacityType,
+				zoneLabel:         zone,
+			}).Set(float64(lo.Ternary(available, 1, 0)))
+			instanceTypeOfferingPriceEstimate.With(prometheus.Labels{
+				instanceTypeLabel: *instanceType.InstanceType,
+				capacityTypeLabel: capacityType,
+				zoneLabel:         zone,
+			}).Set(price)
 		}
 	}
 	return offerings
-}
-
-func (p *Provider) getZones(ctx context.Context, instanceTypeOfferings map[string]sets.Set[string]) sets.Set[string] {
-	// DO NOT REMOVE THIS LOCK ----------------------------------------------------------------------------
-	// We lock here so that multiple callers to getAvailabilityZones do not result in cache misses and multiple
-	// calls to EC2 when we could have just made one call.
-	// TODO @joinnis: This can be made more efficient by holding a Read lock and only obtaining the Write if not in cache
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if cached, ok := p.cache.Get(ZonesCacheKey); ok {
-		return cached.(sets.Set[string])
-	}
-	// Get zones from offerings
-	zones := sets.Set[string]{}
-	for _, offeringZones := range instanceTypeOfferings {
-		for zone := range offeringZones {
-			zones.Insert(zone)
-		}
-	}
-	if p.cm.HasChanged("zones", zones) {
-		logging.FromContext(ctx).With("zones", zones.UnsortedList()).Debugf("discovered zones")
-	}
-	p.cache.Set(ZonesCacheKey, zones, 24*time.Hour)
-	return zones
 }
 
 func (p *Provider) getInstanceTypeOfferings(ctx context.Context) (map[string]sets.Set[string], error) {

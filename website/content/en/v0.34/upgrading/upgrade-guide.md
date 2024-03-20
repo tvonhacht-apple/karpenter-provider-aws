@@ -28,12 +28,12 @@ If you get the error `invalid ownership metadata; label validation error:` while
 In general, you can reapply the CRDs in the `crds` directory of the Karpenter helm chart:
 
 ```shell
-kubectl apply -f https://raw.githubusercontent.com/aws/karpenter/v0.34.1/pkg/apis/crds/karpenter.sh_nodepools.yaml
-kubectl apply -f https://raw.githubusercontent.com/aws/karpenter/v0.34.1/pkg/apis/crds/karpenter.sh_nodeclaims.yaml
-kubectl apply -f https://raw.githubusercontent.com/aws/karpenter/v0.34.1/pkg/apis/crds/karpenter.k8s.aws_ec2nodeclasses.yaml
+kubectl apply -f https://raw.githubusercontent.com/aws/karpenter/v0.34.3/pkg/apis/crds/karpenter.sh_nodepools.yaml
+kubectl apply -f https://raw.githubusercontent.com/aws/karpenter/v0.34.3/pkg/apis/crds/karpenter.sh_nodeclaims.yaml
+kubectl apply -f https://raw.githubusercontent.com/aws/karpenter/v0.34.3/pkg/apis/crds/karpenter.k8s.aws_ec2nodeclasses.yaml
 ```
 
-### Upgrading to v0.34.1+
+### Upgrading to v0.34.0+
 
 [comment]: <> (WHEN CREATING A NEW SECTION OF THE UPGRADE GUIDANCE FOR NEWER VERSIONS, ENSURE THAT YOU COPY THE ALERT SECTION BELOW TO PROPERLY WARN USERS OF THE RISK OF UPGRADING WITHOUT GOING TO v0.32 FIRST)
 
@@ -52,7 +52,7 @@ The Ubuntu EKS optimized AMI has moved from 20.04 to 22.04 for Kubernetes 1.29+.
   * `Multi-Node Consolidation`: max 100 nodes
 * To support Disruption Budgets, v0.34+ includes critical changes to Karpenter's core controllers, which allows Karpenter to consider multiple batches of disrupting nodes simultaneously. This increases Karpenter's performance with the potential downside of higher CPU and memory utilization from the Karpenter pod. While the magnitude of this difference varies on a case-by-case basis, when upgrading to Karpenter v0.34+, please note that you may need to increase the resources allocated to the Karpenter controller pods. 
 * Karpenter now adds a default `podSecurityContext` that configures the `fsgroup: 65536` of volumes in the pod. If you are using sidecar containers, you should review if this configuration is compatible for them. You can disable this default `podSecurityContext` through helm by performing `--set podSecurityContext=null` when installing/upgrading the chart.
-* The `dnsPolicy` for the Karpenter controller pod has been changed back to the Kubernetes cluster default of `ClusterFirst`. Setting our `dnsPolicy` to `Default` (confusingly, this is not the Kubernetes cluster default) caused more confusion for any users running IPv6 clusters with dual-stack nodes or anyone running Karpenter with dependencies on cluster services (like clusters running service meshes). If you still want the old behavior here, you can change the `dnsPolicy` to point to use `Default` by setting the helm value on install/upgrade with `--set dnsPolicy=Default`. More details on this issue can be found in the following Github issues: [#2186](https://github.com/aws/karpenter-provider-aws/issues/2186) and [#4947](https://github.com/aws/karpenter-provider-aws/issues/4947).
+* The `dnsPolicy` for the Karpenter controller pod has been changed back to the Kubernetes cluster default of `ClusterFirst`. Setting our `dnsPolicy` to `Default` (confusingly, this is not the Kubernetes cluster default) caused more confusion for any users running IPv6 clusters with dual-stack nodes or anyone running Karpenter with dependencies on cluster services (like clusters running service meshes). This change may be breaking for any users on Fargate or MNG who were allowing Karpenter to manage their in-cluster DNS service (`core-dns` on most clusters). If you still want the old behavior here, you can change the `dnsPolicy` to point to use `Default` by setting the helm value on install/upgrade with `--set dnsPolicy=Default`. More details on this issue can be found in the following Github issues: [#2186](https://github.com/aws/karpenter-provider-aws/issues/2186) and [#4947](https://github.com/aws/karpenter-provider-aws/issues/4947).
 * Karpenter now disallows `nodepool.spec.template.spec.resources` to be set. The webhook validation never allowed `nodepool.spec.template.spec.resources`. We are now ensuring that CEL validation also disallows `nodepool.spec.template.spec.resources` to be set. If you were previously setting the resources field on your NodePool, ensure that you remove this field before upgrading to the newest version of Karpenter or else updates to the resource may fail on the new version.
 
 ### Upgrading to v0.33.0+

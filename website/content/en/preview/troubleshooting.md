@@ -53,6 +53,18 @@ This can be resolved by creating the [Service Linked Role](https://docs.aws.amaz
 aws iam create-service-linked-role --aws-service-name spot.amazonaws.com
 ```
 
+### Failed Resolving STS Credentials with I/O Timeout
+
+```bash
+Checking EC2 API connectivity, WebIdentityErr: failed to retrieve credentials\ncaused by: RequestError: send request failed\ncaused by: Post \"https://sts.us-east-1.amazonaws.com/\": dial tcp: lookup sts.us-east-1.amazonaws.com: i/o timeout
+```
+
+If you see the error above when you attempt to install Karpenter, this indicates that Karpenter is unable to reach out to the STS endpoint due to failed DNS resolution. This can happen when Karpenter is running with `dnsPolicy: ClusterFirst` and your in-cluster DNS service is not yet running.
+
+You have two mitigations to resolve this error:
+1. Let Karpenter manage your in-cluster DNS service - You can let Karpenter manage your DNS application pods' capacity by changing Karpenter's `dnsPolicy` to be `Default` (run `--set dnsPolicy=Default` with a Helm installation). This ensures that Karpenter reaches out to the [VPC DNS service](https://docs.aws.amazon.com/vpc/latest/userguide/vpc-dns.html) when running its controllers, allowing Karpenter to start-up without the DNS application pods running, enabling Karpenter to manage the capacity for these pods.
+2. Let MNG/Fargate manage your in-cluster DNS service - If running a cluster with MNG, ensure that your group has enough capacity to support the DNS application pods and ensure that the application has the correct tolerations to schedule against the capacity. If running a cluster with Fargate, ensure that you have a [fargate profile](https://docs.aws.amazon.com/eks/latest/userguide/fargate-profile.html) that selects against your DNS application pods.
+
 ### Karpenter Role names exceeding 64-character limit
 
 If you use a tool such as AWS CDK to generate your Kubernetes cluster name, when you add Karpenter to your cluster you could end up with a cluster name that is too long to incorporate into your KarpenterNodeRole name (which is limited to 64 characters).
@@ -77,7 +89,7 @@ Info on whether there has been a change to the CRD between versions of Karpenter
 
 ### Unable to schedule pod due to insufficient node group instances
 
-v0.16.0 changed the default replicas from 1 to 2.
+`0.16.0` changed the default replicas from 1 to 2.
 
 Karpenter won't launch capacity to run itself (log related to the `karpenter.sh/provisioner-name DoesNotExist requirement`)
 so it can't provision for the second Karpenter pod.
@@ -91,28 +103,28 @@ To do so on AWS increase the `minimum` and `desired` parameters on the node grou
 
 If Helm is showing an error when trying to install Karpenter Helm charts:
 
-- Ensure you are using a newer Helm version, Helm started supporting OCI images since v3.8.0.
-- Helm does not have an `helm repo add` concept in OCI, so to install Karpenter you no longer need this
+- Ensure you are using a newer Helm version, Helm started supporting OCI images since `3.8.0`.
+- Helm does not have an `helm repo add` concept in OCI, so to install Karpenter you no longer need this.
+- If you get an error like `Error: public.ecr.aws/karpenter/karpenter:0.34.0: not found` make sure you're adding a `v` prefix for Karpenter versions between `0.17.0` & `0.34.x`.
 - Verify that the image you are trying to pull actually exists in [gallery.ecr.aws/karpenter](https://gallery.ecr.aws/karpenter/karpenter)
 - Sometimes Helm generates a generic error, you can add the --debug switch to any of the Helm commands in this doc for more verbose error messages
-- If you are getting a 403 forbidden error, you can try `docker logout public.ecr.aws` as explained [here](https://docs.aws.amazon.com/AmazonECR/latest/public/public-troubleshooting.html)
-- If you are receiving this error: `Error: failed to download "oci://public.ecr.aws/karpenter/karpenter" at version "0.17.0"`, then you need to prepend a `v` to the version number: `v0.17.0`. Before Karpenter moved to OCI Helm charts (pre-v0.17.0), both `v0.16.0` and `0.16.0` would work, but OCI charts require an exact version match.
+- If you are getting a 403 forbidden error, you can try `docker logout public.ecr.aws` as explained [here](https://docs.aws.amazon.com/AmazonECR/latest/public/public-troubleshooting.html).
 
 ### Helm Error when installing the `karpenter-crd` chart
 
-Karpenter v0.26.1+ introduced the `karpenter-crd` Helm chart. When installing this chart on your cluster, if you have previously added the Karpenter CRDs to your cluster through the `karpenter` controller chart or through `kubectl replace`, Helm will reject the install of the chart due to `invalid ownership metadata`.
+Karpenter `0.26.1` introduced the `karpenter-crd` Helm chart. When installing this chart on your cluster, if you have previously added the Karpenter CRDs to your cluster through the `karpenter` controller chart or through `kubectl replace`, Helm will reject the install of the chart due to `invalid ownership metadata`.
 
 - In the case of `invalid ownership metadata; label validation error: missing key "app.kubernetes.io/managed-by": must be set to "Helm"` run:
 
 ```shell
-kubectl label crd awsnodetemplates.karpenter.k8s.aws provisioners.karpenter.sh machines.karpenter.sh app.kubernetes.io/managed-by=Helm --overwrite
+kubectl label crd ec2nodeclasses.karpenter.k8s.aws nodepools.karpenter.sh nodeclaims.karpenter.sh app.kubernetes.io/managed-by=Helm --overwrite
 ```
 
 - In the case of `annotation validation error: missing key "meta.helm.sh/release-namespace": must be set to "karpenter"` run:
 
 ```shell
-kubectl annotate crd awsnodetemplates.karpenter.k8s.aws provisioners.karpenter.sh machines.karpenter.sh meta.helm.sh/release-name=karpenter-crd --overwrite
-kubectl annotate crd awsnodetemplates.karpenter.k8s.aws provisioners.karpenter.sh machines.karpenter.sh meta.helm.sh/release-namespace=karpenter --overwrite
+kubectl annotate crd ec2nodeclasses.karpenter.k8s.aws nodepools.karpenter.sh nodeclaims.karpenter.sh meta.helm.sh/release-name=karpenter-crd --overwrite
+kubectl annotate crd ec2nodeclasses.karpenter.k8s.aws nodepools.karpenter.sh nodeclaims.karpenter.sh meta.helm.sh/release-namespace=karpenter --overwrite
 ```
 
 ## Uninstallation
@@ -137,7 +149,7 @@ kubectl get nodes -ojsonpath='{range .items[*].metadata}{@.name}:{@.finalizers}{
 
 If you are not able to create a provisioner due to `Internal error occurred: failed calling webhook "validation.webhook.provisioners.karpenter.sh":`
 
-Webhooks were renamed in `v0.19.0`. There's a bug in ArgoCD's upgrade workflow where webhooks are leaked. This results in Provisioner's failing to be validated, since the validation server no longer corresponds to the webhook definition.
+Webhooks were renamed in `0.19.0`. There's a bug in ArgoCD's upgrade workflow where webhooks are leaked. This results in Provisioner's failing to be validated, since the validation server no longer corresponds to the webhook definition.
 
 Delete the stale webhooks.
 
@@ -148,7 +160,7 @@ kubectl delete validatingwebhookconfiguration validation.webhook.provisioners.ka
 
 ### Failed calling webhook "defaulting.webhook.karpenter.sh"
 
-The `defaulting.webhook.karpenter.sh` mutating webhook was removed in `v0.27.3`. If you are coming from an older version of Karpenter where this webhook existed and the webhook was not managed by Helm, you may need to delete the stale webhook.
+The `defaulting.webhook.karpenter.sh` mutating webhook was removed in `0.27.3`. If you are coming from an older version of Karpenter where this webhook existed and the webhook was not managed by Helm, you may need to delete the stale webhook.
 
 ```text
 kubectl delete mutatingwebhookconfigurations defaulting.webhook.karpenter.sh
@@ -192,11 +204,11 @@ Disabling swap will allow kubelet to join the cluster successfully, however user
 
 ### DaemonSets can result in deployment failures
 
-For Karpenter versions 0.5.3 and earlier, DaemonSets were not properly considered when provisioning nodes.
+For Karpenter versions `0.5.3` and earlier, DaemonSets were not properly considered when provisioning nodes.
 This sometimes caused nodes to be deployed that could not meet the needs of the requested DaemonSets and workloads.
-This issue no longer occurs after Karpenter version 0.5.3 (see [PR #1155](https://github.com/aws/karpenter/pull/1155)).
+This issue no longer occurs after Karpenter version `0.5.3` (see [PR #1155](https://github.com/aws/karpenter/pull/1155)).
 
-If you are using a pre-0.5.3 version of Karpenter, one workaround is to set your provisioner to only use larger instance types that you know will be big enough for the DaemonSet and the workload.
+If you are using a pre `0.5.3` version of Karpenter, one workaround is to set your provisioner to only use larger instance types that you know will be big enough for the DaemonSet and the workload.
 For more information, see [Issue #1084](https://github.com/aws/karpenter/issues/1084).
 Examples of this behavior are included in [Issue #1180](https://github.com/aws/karpenter/issues/1180).
 
@@ -213,7 +225,7 @@ See the Karpenter [Best Practices Guide](https://aws.github.io/aws-eks-best-prac
 
 ### Missing subnetSelector and securityGroupSelector tags causes provisioning failures
 
-Starting with Karpenter v0.5.5, if you are using Karpenter-generated launch template, provisioners require that [subnetSelector]({{<ref "./concepts/nodeclasses/#subnetselector" >}}) and [securityGroupSelector]({{<ref "./concepts/nodeclasses/#securitygroupselector" >}}) tags be set to match your cluster.
+Starting with Karpenter `0.5.5`, if you are using Karpenter-generated launch template, provisioners require that [subnetSelector]({{<ref "./concepts/nodeclasses/#subnetselector" >}}) and [securityGroupSelector]({{<ref "./concepts/nodeclasses/#securitygroupselector" >}}) tags be set to match your cluster.
 The [Provisioner]({{<ref "./getting-started/getting-started-with-karpenter/#provisioner" >}}) section in the Karpenter Getting Started Guide uses the following example:
 
 ```text

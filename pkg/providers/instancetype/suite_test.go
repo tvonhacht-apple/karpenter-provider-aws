@@ -173,6 +173,7 @@ var _ = Describe("InstanceTypes", func() {
 			v1beta1.LabelInstanceFamily:                       "g4dn",
 			v1beta1.LabelInstanceSize:                         "8xlarge",
 			v1beta1.LabelInstanceCPU:                          "32",
+			v1beta1.LabelInstanceCPUManufacturer:              "intel",
 			v1beta1.LabelInstanceMemory:                       "131072",
 			v1beta1.LabelInstanceNetworkBandwidth:             "50000",
 			v1beta1.LabelInstanceGPUName:                      "t4",
@@ -225,6 +226,7 @@ var _ = Describe("InstanceTypes", func() {
 			v1beta1.LabelInstanceFamily:                       "g4dn",
 			v1beta1.LabelInstanceSize:                         "8xlarge",
 			v1beta1.LabelInstanceCPU:                          "32",
+			v1beta1.LabelInstanceCPUManufacturer:              "intel",
 			v1beta1.LabelInstanceMemory:                       "131072",
 			v1beta1.LabelInstanceNetworkBandwidth:             "50000",
 			v1beta1.LabelInstanceGPUName:                      "t4",
@@ -275,6 +277,7 @@ var _ = Describe("InstanceTypes", func() {
 			v1beta1.LabelInstanceFamily:                       "inf1",
 			v1beta1.LabelInstanceSize:                         "2xlarge",
 			v1beta1.LabelInstanceCPU:                          "8",
+			v1beta1.LabelInstanceCPUManufacturer:              "intel",
 			v1beta1.LabelInstanceMemory:                       "16384",
 			v1beta1.LabelInstanceNetworkBandwidth:             "5000",
 			v1beta1.LabelInstanceAcceleratorName:              "inferentia",
@@ -356,7 +359,7 @@ var _ = Describe("InstanceTypes", func() {
 		call := awsEnv.EC2API.CreateFleetBehavior.CalledWithInput.Pop()
 		Expect(call.LaunchTemplateConfigs).To(HaveLen(1))
 
-		Expect(call.LaunchTemplateConfigs[0].Overrides).To(HaveLen(100))
+		Expect(call.LaunchTemplateConfigs[0].Overrides).To(HaveLen(60))
 		for _, override := range call.LaunchTemplateConfigs[0].Overrides {
 			Expect(expected.Has(aws.StringValue(override.InstanceType))).To(BeTrue(), fmt.Sprintf("expected %s to exist in set", aws.StringValue(override.InstanceType)))
 		}
@@ -741,34 +744,71 @@ var _ = Describe("InstanceTypes", func() {
 			Expect(it.Capacity.Pods().Value()).To(BeNumerically("==", 110))
 		}
 	})
-
-	It("should expose vcpu metrics for instance types", func() {
-		instanceInfo, err := awsEnv.InstanceTypesProvider.List(ctx, nodePool.Spec.Template.Spec.Kubelet, nodeClass)
-		Expect(err).To(BeNil())
-		Expect(len(instanceInfo)).To(BeNumerically(">", 0))
-		for _, info := range instanceInfo {
-			metric, ok := FindMetricWithLabelValues("karpenter_cloudprovider_instance_type_cpu_cores", map[string]string{
-				instancetype.InstanceTypeLabel: info.Name,
-			})
-			Expect(ok).To(BeTrue())
-			Expect(metric).To(Not(BeNil()))
-			value := metric.GetGauge().Value
-			Expect(aws.Float64Value(value)).To(BeNumerically(">", 0))
-		}
-	})
-	It("should expose memory metrics for instance types", func() {
-		instanceInfo, err := awsEnv.InstanceTypesProvider.List(ctx, nodePool.Spec.Template.Spec.Kubelet, nodeClass)
-		Expect(err).To(BeNil())
-		Expect(len(instanceInfo)).To(BeNumerically(">", 0))
-		for _, info := range instanceInfo {
-			metric, ok := FindMetricWithLabelValues("karpenter_cloudprovider_instance_type_memory_bytes", map[string]string{
-				instancetype.InstanceTypeLabel: info.Name,
-			})
-			Expect(ok).To(BeTrue())
-			Expect(metric).To(Not(BeNil()))
-			value := metric.GetGauge().Value
-			Expect(aws.Float64Value(value)).To(BeNumerically(">", 0))
-		}
+	Context("Metrics", func() {
+		It("should expose vcpu metrics for instance types", func() {
+			instanceTypes, err := awsEnv.InstanceTypesProvider.List(ctx, nodePool.Spec.Template.Spec.Kubelet, nodeClass)
+			Expect(err).To(BeNil())
+			Expect(len(instanceTypes)).To(BeNumerically(">", 0))
+			for _, it := range instanceTypes {
+				metric, ok := FindMetricWithLabelValues("karpenter_cloudprovider_instance_type_cpu_cores", map[string]string{
+					"instance_type": it.Name,
+				})
+				Expect(ok).To(BeTrue())
+				Expect(metric).To(Not(BeNil()))
+				value := metric.GetGauge().Value
+				Expect(aws.Float64Value(value)).To(BeNumerically(">", 0))
+			}
+		})
+		It("should expose memory metrics for instance types", func() {
+			instanceTypes, err := awsEnv.InstanceTypesProvider.List(ctx, nodePool.Spec.Template.Spec.Kubelet, nodeClass)
+			Expect(err).To(BeNil())
+			Expect(len(instanceTypes)).To(BeNumerically(">", 0))
+			for _, it := range instanceTypes {
+				metric, ok := FindMetricWithLabelValues("karpenter_cloudprovider_instance_type_memory_bytes", map[string]string{
+					"instance_type": it.Name,
+				})
+				Expect(ok).To(BeTrue())
+				Expect(metric).To(Not(BeNil()))
+				value := metric.GetGauge().Value
+				Expect(aws.Float64Value(value)).To(BeNumerically(">", 0))
+			}
+		})
+		It("should expose availability metrics for instance types", func() {
+			instanceTypes, err := awsEnv.InstanceTypesProvider.List(ctx, nodePool.Spec.Template.Spec.Kubelet, nodeClass)
+			Expect(err).To(BeNil())
+			Expect(len(instanceTypes)).To(BeNumerically(">", 0))
+			for _, it := range instanceTypes {
+				for _, of := range it.Offerings {
+					metric, ok := FindMetricWithLabelValues("karpenter_cloudprovider_instance_type_offering_available", map[string]string{
+						"instance_type": it.Name,
+						"capacity_type": of.CapacityType,
+						"zone":          of.Zone,
+					})
+					Expect(ok).To(BeTrue())
+					Expect(metric).To(Not(BeNil()))
+					value := metric.GetGauge().Value
+					Expect(aws.Float64Value(value)).To(BeNumerically("==", lo.Ternary(of.Available, 1, 0)))
+				}
+			}
+		})
+		It("should expose pricing metrics for instance types", func() {
+			instanceTypes, err := awsEnv.InstanceTypesProvider.List(ctx, nodePool.Spec.Template.Spec.Kubelet, nodeClass)
+			Expect(err).To(BeNil())
+			Expect(len(instanceTypes)).To(BeNumerically(">", 0))
+			for _, it := range instanceTypes {
+				for _, of := range it.Offerings {
+					metric, ok := FindMetricWithLabelValues("karpenter_cloudprovider_instance_type_offering_price_estimate", map[string]string{
+						"instance_type": it.Name,
+						"capacity_type": of.CapacityType,
+						"zone":          of.Zone,
+					})
+					Expect(ok).To(BeTrue())
+					Expect(metric).To(Not(BeNil()))
+					value := metric.GetGauge().Value
+					Expect(aws.Float64Value(value)).To(BeNumerically("==", of.Price))
+				}
+			}
+		})
 	})
 	It("should launch instances in local zones", func() {
 		ExpectApplied(ctx, env.Client, nodePool, nodeClass)
@@ -1582,6 +1622,22 @@ var _ = Describe("InstanceTypes", func() {
 			})
 		})
 		It("should default to EBS defaults when volumeSize is not defined in blockDeviceMappings for AL2 Root volume", func() {
+			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+			pod := coretest.UnschedulablePod()
+			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
+			node := ExpectScheduled(ctx, env.Client, pod)
+			Expect(*node.Status.Capacity.StorageEphemeral()).To(Equal(resource.MustParse("20Gi")))
+			Expect(awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.Len()).To(BeNumerically(">=", 1))
+			awsEnv.EC2API.CalledWithCreateLaunchTemplateInput.ForEach(func(ltInput *ec2.CreateLaunchTemplateInput) {
+				Expect(ltInput.LaunchTemplateData.BlockDeviceMappings).To(HaveLen(1))
+				Expect(*ltInput.LaunchTemplateData.BlockDeviceMappings[0].DeviceName).To(Equal("/dev/xvda"))
+				Expect(*ltInput.LaunchTemplateData.BlockDeviceMappings[0].Ebs.SnapshotId).To(Equal("snap-xxxxxxxx"))
+			})
+		})
+		It("should default to EBS defaults when volumeSize is not defined in blockDeviceMappings for AL2023 Root volume", func() {
+			nodeClass.Spec.AMIFamily = aws.String(v1beta1.AMIFamilyAL2023)
+			awsEnv.LaunchTemplateProvider.CABundle = lo.ToPtr("Y2EtYnVuZGxlCg==")
+			awsEnv.LaunchTemplateProvider.ClusterCIDR.Store(lo.ToPtr("10.100.0.0/16"))
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			pod := coretest.UnschedulablePod()
 			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)

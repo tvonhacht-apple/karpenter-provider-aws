@@ -58,7 +58,7 @@ If you open a new shell to run steps in this procedure, you need to set some or 
 To remind yourself of these values, type:
 
 ```bash
-echo "${KARPENTER_NAMESPACE}" "${KARPENTER_VERSION}" "${K8S_VERSION}" "${CLUSTER_NAME}" "${AWS_DEFAULT_REGION}" "${AWS_ACCOUNT_ID}" "${TEMPOUT}"
+echo "${KARPENTER_NAMESPACE}" "${KARPENTER_VERSION}" "${K8S_VERSION}" "${CLUSTER_NAME}" "${AWS_DEFAULT_REGION}" "${AWS_ACCOUNT_ID}" "${TEMPOUT}" "${ARM_AMI_ID}" "${AMD_AMI_ID}" "${GPU_AMI_ID}"
 ```
 
 {{% /alert %}}
@@ -89,6 +89,18 @@ See [Enabling Windows support](https://docs.aws.amazon.com/eks/latest/userguide/
 ### 4. Install Karpenter
 
 {{% script file="./content/en/{VERSION}/getting-started/getting-started-with-karpenter/scripts/step08-apply-helm-chart.sh" language="bash"%}}
+
+As the OCI Helm chart is signed by [Cosign](https://github.com/sigstore/cosign) as part of the release process you can verify the chart before installing it by running the following command.
+
+```bash
+cosign verify public.ecr.aws/karpenter/karpenter:{{< param "latest_release_version" >}} \
+  --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp='https://github\.com/aws/karpenter-provider-aws/\.github/workflows/release\.yaml@.+' \
+  --certificate-github-workflow-repository=aws/karpenter-provider-aws \
+  --certificate-github-workflow-name=Release \
+  --certificate-github-workflow-ref=refs/tags/v{{< param "latest_release_version" >}} \
+  --annotations version={{< param "latest_release_version" >}}
+```
 
 {{% alert title="DNS Policy Notice" color="warning" %}}
 Karpenter uses the `ClusterFirst` pod DNS policy by default. This is the Kubernetes cluster default and this ensures that Karpetner can reach-out to internal Kubernetes services during its lifetime. There may be cases where you do not have the DNS service that you are using on your cluster up-and-running before Karpenter starts up. The most common case of this is you want Karpenter to manage the node capacity where your DNS service pods are running.
@@ -194,6 +206,7 @@ com.amazonaws.<region>.s3 – For pulling container images
 com.amazonaws.<region>.sts – For IAM roles for service accounts
 com.amazonaws.<region>.ssm - For resolving default AMIs
 com.amazonaws.<region>.sqs - For accessing SQS if using interruption handling
+com.amazonaws.<region>.eks - For Karpenter to discover the cluster endpoint
 ```
 
 If you do not currently have these endpoints surfaced in your VPC, you can add the endpoints by running

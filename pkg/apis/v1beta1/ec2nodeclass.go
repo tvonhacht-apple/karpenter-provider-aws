@@ -51,7 +51,7 @@ type EC2NodeClassSpec struct {
 	// +optional
 	AMISelectorTerms []AMISelectorTerm `json:"amiSelectorTerms,omitempty" hash:"ignore"`
 	// AMIFamily is the AMI family that instances use.
-	// +kubebuilder:validation:Enum:={AL2,Bottlerocket,Ubuntu,Custom,Windows2019,Windows2022}
+	// +kubebuilder:validation:Enum:={AL2,AL2023,Bottlerocket,Ubuntu,Custom,Windows2019,Windows2022}
 	// +required
 	AMIFamily *string `json:"amiFamily"`
 	// UserData to be applied to the provisioned nodes.
@@ -328,6 +328,12 @@ type EC2NodeClass struct {
 	Spec   EC2NodeClassSpec   `json:"spec,omitempty"`
 	Status EC2NodeClassStatus `json:"status,omitempty"`
 }
+
+// We need to bump the EC2NodeClassHashVersion when we make an update to the EC2NodeClass CRD under these conditions:
+// 1. A field changes its default value for an existing field that is already hashed
+// 2. A field is added to the hash calculation with an already-set value
+// 3. A field is removed from the hash calculations
+const EC2NodeClassHashVersion = "v1"
 
 func (in *EC2NodeClass) Hash() string {
 	return fmt.Sprint(lo.Must(hashstructure.Hash(in.Spec, hashstructure.FormatV2, &hashstructure.HashOptions{

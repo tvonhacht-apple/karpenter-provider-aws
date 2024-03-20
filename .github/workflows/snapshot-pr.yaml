@@ -14,7 +14,7 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
       - uses: ./.github/actions/download-artifact
       - id: metadata
         run: |
@@ -22,7 +22,7 @@ jobs:
           pr_commit="$(tail -n 1 /tmp/artifacts/metadata.txt)"
           echo PR_COMMIT="$pr_commit" >> "$GITHUB_ENV"
           echo PR_NUMBER="$pr_number" >> "$GITHUB_ENV"
-      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
         with:
           ref: ${{ env.PR_COMMIT }}
       - uses: ./.github/actions/commit-status/start
@@ -50,7 +50,7 @@ jobs:
             ~~~
             aws ecr get-login-password --region ${process.env.SNAPSHOT_REGION} | docker login --username AWS --password-stdin ${process.env.SNAPSHOT_ACCOUNT_ID}.dkr.ecr.${process.env.SNAPSHOT_REGION}.amazonaws.com
             
-            helm upgrade --install karpenter oci://${process.env.SNAPSHOT_ACCOUNT_ID}.dkr.ecr.${process.env.SNAPSHOT_REGION}.amazonaws.com/karpenter/snapshot --version "0-${process.env.PR_COMMIT}" --namespace "kube-system" --create-namespace \\
+            helm upgrade --install karpenter oci://${process.env.SNAPSHOT_ACCOUNT_ID}.dkr.ecr.${process.env.SNAPSHOT_REGION}.amazonaws.com/karpenter/snapshot/karpenter --version "0-${process.env.PR_COMMIT}" --namespace "kube-system" --create-namespace \\
               --set "settings.clusterName=\${CLUSTER_NAME}" \\
               --set "settings.interruptionQueue=\${CLUSTER_NAME}" \\
               --set controller.resources.requests.cpu=1 \\

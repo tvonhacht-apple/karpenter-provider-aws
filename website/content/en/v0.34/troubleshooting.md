@@ -53,6 +53,18 @@ This can be resolved by creating the [Service Linked Role](https://docs.aws.amaz
 aws iam create-service-linked-role --aws-service-name spot.amazonaws.com
 ```
 
+### Failed Resolving STS Credentials with I/O Timeout
+
+```bash
+Checking EC2 API connectivity, WebIdentityErr: failed to retrieve credentials\ncaused by: RequestError: send request failed\ncaused by: Post \"https://sts.us-east-1.amazonaws.com/\": dial tcp: lookup sts.us-east-1.amazonaws.com: i/o timeout
+```
+
+If you see the error above when you attempt to install Karpenter, this indicates that Karpenter is unable to reach out to the STS endpoint due to failed DNS resolution. This can happen when Karpenter is running with `dnsPolicy: ClusterFirst` and your in-cluster DNS service is not yet running.
+
+You have two mitigations to resolve this error:
+1. Let Karpenter manage your in-cluster DNS service - You can let Karpenter manage your DNS application pods' capacity by changing Karpenter's `dnsPolicy` to be `Default` (run `--set dnsPolicy=Default` with a Helm installation). This ensures that Karpenter reaches out to the [VPC DNS service](https://docs.aws.amazon.com/vpc/latest/userguide/vpc-dns.html) when running its controllers, allowing Karpenter to start-up without the DNS application pods running, enabling Karpenter to manage the capacity for these pods. 
+2. Let MNG/Fargate manage your in-cluster DNS service - If running a cluster with MNG, ensure that your group has enough capacity to support the DNS application pods and ensure that the application has the correct tolerations to schedule against the capacity. If running a cluster with Fargate, ensure that you have a [fargate profile](https://docs.aws.amazon.com/eks/latest/userguide/fargate-profile.html) that selects against your DNS application pods.
+
 ### Karpenter Role names exceeding 64-character limit
 
 If you use a tool such as AWS CDK to generate your Kubernetes cluster name, when you add Karpenter to your cluster you could end up with a cluster name that is too long to incorporate into your KarpenterNodeRole name (which is limited to 64 characters).
@@ -105,14 +117,14 @@ Karpenter v0.26.1+ introduced the `karpenter-crd` helm chart. When installing th
 - In the case of `invalid ownership metadata; label validation error: missing key "app.kubernetes.io/managed-by": must be set to "Helm"` run:
 
 ```shell
-kubectl label crd awsnodetemplates.karpenter.k8s.aws provisioners.karpenter.sh machines.karpenter.sh app.kubernetes.io/managed-by=Helm --overwrite
+kubectl label crd ec2nodeclasses.karpenter.k8s.aws nodepools.karpenter.sh nodeclaims.karpenter.sh app.kubernetes.io/managed-by=Helm --overwrite
 ```
 
 - In the case of `annotation validation error: missing key "meta.helm.sh/release-namespace": must be set to "karpenter"` run:
 
 ```shell
-kubectl annotate crd awsnodetemplates.karpenter.k8s.aws provisioners.karpenter.sh machines.karpenter.sh meta.helm.sh/release-name=karpenter-crd --overwrite
-kubectl annotate crd awsnodetemplates.karpenter.k8s.aws provisioners.karpenter.sh machines.karpenter.sh meta.helm.sh/release-namespace=karpenter --overwrite
+kubectl annotate crd ec2nodeclasses.karpenter.k8s.aws nodepools.karpenter.sh nodeclaims.karpenter.sh meta.helm.sh/release-name=karpenter-crd --overwrite
+kubectl annotate crd ec2nodeclasses.karpenter.k8s.aws nodepools.karpenter.sh nodeclaims.karpenter.sh meta.helm.sh/release-namespace=karpenter --overwrite
 ```
 
 ## Uninstallation
