@@ -39,10 +39,12 @@ import (
 	"github.com/aws/karpenter-provider-aws/pkg/apis"
 	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
 	"github.com/aws/karpenter-provider-aws/pkg/cloudprovider"
+	"github.com/aws/karpenter-provider-aws/pkg/controllers/nodeclass/status"
 	"github.com/aws/karpenter-provider-aws/pkg/fake"
 	"github.com/aws/karpenter-provider-aws/pkg/operator/options"
 	"github.com/aws/karpenter-provider-aws/pkg/test"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 	corecloudproivder "sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/controllers/provisioning"
@@ -113,7 +115,41 @@ var _ = Describe("CloudProvider", func() {
 	var nodePool *corev1beta1.NodePool
 	var nodeClaim *corev1beta1.NodeClaim
 	var _ = BeforeEach(func() {
-		nodeClass = test.EC2NodeClass()
+		nodeClass = test.EC2NodeClass(
+			v1beta1.EC2NodeClass{
+				Status: v1beta1.EC2NodeClassStatus{
+					InstanceProfile: "test-profile",
+					SecurityGroups: []v1beta1.SecurityGroup{
+						{
+							ID:   "sg-test1",
+							Name: "securityGroup-test1",
+						},
+						{
+							ID:   "sg-test2",
+							Name: "securityGroup-test2",
+						},
+						{
+							ID:   "sg-test3",
+							Name: "securityGroup-test3",
+						},
+					},
+					Subnets: []v1beta1.Subnet{
+						{
+							ID:   "subnet-test1",
+							Zone: "test-zone-1a",
+						},
+						{
+							ID:   "subnet-test2",
+							Zone: "test-zone-1b",
+						},
+						{
+							ID:   "subnet-test3",
+							Zone: "test-zone-1c",
+						},
+					},
+				},
+			},
+		)
 		nodePool = coretest.NodePool(corev1beta1.NodePool{
 			Spec: corev1beta1.NodePoolSpec{
 				Template: corev1beta1.NodeClaimTemplate{
@@ -138,6 +174,10 @@ var _ = Describe("CloudProvider", func() {
 				},
 			},
 		})
+		_, err := awsEnv.SubnetProvider.List(ctx, nodeClass) // Hydrate the subnet cache
+		Expect(err).To(BeNil())
+		Expect(awsEnv.InstanceTypesProvider.UpdateInstanceTypes(ctx)).To(Succeed())
+		Expect(awsEnv.InstanceTypesProvider.UpdateInstanceTypeOfferings(ctx)).To(Succeed())
 	})
 	It("should return an ICE error when there are no instance types to launch", func() {
 		// Specify no instance types and expect to receive a capacity error
@@ -169,6 +209,15 @@ var _ = Describe("CloudProvider", func() {
 		Expect(cloudProviderNodeClaim).ToNot(BeNil())
 		_, ok := cloudProviderNodeClaim.ObjectMeta.Annotations[v1beta1.AnnotationEC2NodeClassHash]
 		Expect(ok).To(BeTrue())
+	})
+	It("should return NodeClass Hash Version on the nodeClaim", func() {
+		ExpectApplied(ctx, env.Client, nodePool, nodeClass, nodeClaim)
+		cloudProviderNodeClaim, err := cloudProvider.Create(ctx, nodeClaim)
+		Expect(err).To(BeNil())
+		Expect(cloudProviderNodeClaim).ToNot(BeNil())
+		v, ok := cloudProviderNodeClaim.ObjectMeta.Annotations[v1beta1.AnnotationEC2NodeClassHashVersion]
+		Expect(ok).To(BeTrue())
+		Expect(v).To(Equal(v1beta1.EC2NodeClassHashVersion))
 	})
 	Context("EC2 Context", func() {
 		contextID := "context-1234"
@@ -221,6 +270,8 @@ var _ = Describe("CloudProvider", func() {
 					},
 				},
 			})
+			Expect(awsEnv.InstanceTypesProvider.UpdateInstanceTypes(ctx)).To(Succeed())
+			Expect(awsEnv.InstanceTypesProvider.UpdateInstanceTypeOfferings(ctx)).To(Succeed())
 			Expect(awsEnv.PricingProvider.UpdateSpotPricing(ctx)).To(Succeed())
 			instanceNames := lo.Map(instances, func(info *ec2.InstanceTypeInfo, _ int) string { return *info.InstanceType })
 
@@ -315,6 +366,8 @@ var _ = Describe("CloudProvider", func() {
 					},
 				},
 			})
+			Expect(awsEnv.InstanceTypesProvider.UpdateInstanceTypes(ctx)).To(Succeed())
+			Expect(awsEnv.InstanceTypesProvider.UpdateInstanceTypeOfferings(ctx)).To(Succeed())
 			Expect(awsEnv.PricingProvider.UpdateSpotPricing(ctx)).To(Succeed())
 			instanceNames := lo.Map(instances, func(info *ec2.InstanceTypeInfo, _ int) string { return *info.InstanceType })
 
@@ -416,6 +469,8 @@ var _ = Describe("CloudProvider", func() {
 					},
 				},
 			})
+			Expect(awsEnv.InstanceTypesProvider.UpdateInstanceTypes(ctx)).To(Succeed())
+			Expect(awsEnv.InstanceTypesProvider.UpdateInstanceTypeOfferings(ctx)).To(Succeed())
 			Expect(awsEnv.PricingProvider.UpdateSpotPricing(ctx)).To(Succeed())
 			instanceNames := lo.Map(uniqInstanceTypes, func(info *ec2.InstanceTypeInfo, _ int) string { return *info.InstanceType })
 
@@ -569,6 +624,21 @@ var _ = Describe("CloudProvider", func() {
 					},
 				},
 			})
+			nodeClass.Status.Subnets = []v1beta1.Subnet{
+				{
+					ID:   validSubnet1,
+					Zone: "zone-1",
+				},
+				{
+					ID:   validSubnet2,
+					Zone: "zone-2",
+				},
+			}
+			nodeClass.Status.SecurityGroups = []v1beta1.SecurityGroup{
+				{
+					ID: validSecurityGroup,
+				},
+			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
 			instanceTypes, err := cloudProvider.GetInstanceTypes(ctx, nodePool)
 			Expect(err).ToNot(HaveOccurred())
@@ -644,7 +714,8 @@ var _ = Describe("CloudProvider", func() {
 		})
 		It("should return an error if subnets are empty", func() {
 			awsEnv.SubnetCache.Flush()
-			awsEnv.EC2API.DescribeSubnetsOutput.Set(&ec2.DescribeSubnetsOutput{Subnets: []*ec2.Subnet{}})
+			nodeClass.Status.Subnets = []v1beta1.Subnet{}
+			ExpectApplied(ctx, env.Client, nodeClass)
 			_, err := cloudProvider.IsDrifted(ctx, nodeClaim)
 			Expect(err).To(HaveOccurred())
 		})
@@ -654,7 +725,8 @@ var _ = Describe("CloudProvider", func() {
 			Expect(isDrifted).To(BeEmpty())
 		})
 		It("should return an error if the security groups are empty", func() {
-			awsEnv.EC2API.DescribeSecurityGroupsOutput.Set(&ec2.DescribeSecurityGroupsOutput{SecurityGroups: []*ec2.SecurityGroup{}})
+			nodeClass.Status.SecurityGroups = []v1beta1.SecurityGroup{}
+			ExpectApplied(ctx, env.Client, nodeClass)
 			// Instance is a reference to what we return in the GetInstances call
 			instance.SecurityGroups = []*ec2.GroupIdentifier{{GroupId: aws.String(fake.SecurityGroupID())}}
 			_, err := cloudProvider.IsDrifted(ctx, nodeClaim)
@@ -675,18 +747,17 @@ var _ = Describe("CloudProvider", func() {
 			Expect(isDrifted).To(Equal(cloudprovider.SecurityGroupDrift))
 		})
 		It("should return drifted if more security groups are present than instance security groups then discovered from nodeclass", func() {
-			awsEnv.EC2API.DescribeSecurityGroupsOutput.Set(&ec2.DescribeSecurityGroupsOutput{
-				SecurityGroups: []*ec2.SecurityGroup{
-					{
-						GroupId:   aws.String(validSecurityGroup),
-						GroupName: aws.String("test-securitygroup"),
-					},
-					{
-						GroupId:   aws.String(fake.SecurityGroupID()),
-						GroupName: aws.String("test-securitygroup"),
-					},
+			nodeClass.Status.SecurityGroups = []v1beta1.SecurityGroup{
+				{
+					ID:   validSecurityGroup,
+					Name: "test-securitygroup",
 				},
-			})
+				{
+					ID:   fake.SecurityGroupID(),
+					Name: "test-securitygroup",
+				},
+			}
+			ExpectApplied(ctx, env.Client, nodeClass)
 			isDrifted, err := cloudProvider.IsDrifted(ctx, nodeClaim)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(isDrifted).To(Equal(cloudprovider.SecurityGroupDrift))
@@ -760,6 +831,23 @@ var _ = Describe("CloudProvider", func() {
 							},
 						},
 					},
+					Status: v1beta1.EC2NodeClassStatus{
+						Subnets: []v1beta1.Subnet{
+							{
+								ID:   validSubnet1,
+								Zone: "zone-1",
+							},
+							{
+								ID:   validSubnet2,
+								Zone: "zone-2",
+							},
+						},
+						SecurityGroups: []v1beta1.SecurityGroup{
+							{
+								ID: validSecurityGroup,
+							},
+						},
+					},
 				}
 				nodeClass.Annotations = lo.Assign(nodeClass.Annotations, map[string]string{v1beta1.AnnotationEC2NodeClassHash: nodeClass.Hash()})
 				nodeClaim.Annotations = lo.Assign(nodeClaim.Annotations, map[string]string{v1beta1.AnnotationEC2NodeClassHash: nodeClass.Hash()})
@@ -771,7 +859,7 @@ var _ = Describe("CloudProvider", func() {
 					Expect(err).NotTo(HaveOccurred())
 					Expect(isDrifted).To(BeEmpty())
 
-					Expect(mergo.Merge(nodeClass, changes, mergo.WithOverride, mergo.WithSliceDeepCopy))
+					Expect(mergo.Merge(nodeClass, changes, mergo.WithOverride, mergo.WithSliceDeepCopy)).To(Succeed())
 					nodeClass.Annotations = lo.Assign(nodeClass.Annotations, map[string]string{v1beta1.AnnotationEC2NodeClassHash: nodeClass.Hash()})
 
 					ExpectApplied(ctx, env.Client, nodeClass)
@@ -798,12 +886,19 @@ var _ = Describe("CloudProvider", func() {
 				Entry("BlockDeviceMapping KMSKeyID", v1beta1.EC2NodeClass{Spec: v1beta1.EC2NodeClassSpec{BlockDeviceMappings: []*v1beta1.BlockDeviceMapping{{EBS: &v1beta1.BlockDevice{KMSKeyID: lo.ToPtr("test")}}}}}),
 				Entry("BlockDeviceMapping SnapshotID", v1beta1.EC2NodeClass{Spec: v1beta1.EC2NodeClassSpec{BlockDeviceMappings: []*v1beta1.BlockDeviceMapping{{EBS: &v1beta1.BlockDevice{SnapshotID: lo.ToPtr("test")}}}}}),
 				Entry("BlockDeviceMapping Throughput", v1beta1.EC2NodeClass{Spec: v1beta1.EC2NodeClassSpec{BlockDeviceMappings: []*v1beta1.BlockDeviceMapping{{EBS: &v1beta1.BlockDevice{Throughput: lo.ToPtr(int64(10))}}}}}),
-				// Karpenter currently have a bug with volumeSize will cause NodeClaims to not be drifted, when the field is updated
-				// TODO: Enable volumeSize once they can be used for static drift
-				// For more information: https://github.com/aws/karpenter-provider-aws/issues/5447
-				// Entry("BlockDeviceMapping VolumeSize", v1beta1.EC2NodeClass{Spec: v1beta1.EC2NodeClassSpec{BlockDeviceMappings: []*v1beta1.BlockDeviceMapping{{EBS: &v1beta1.BlockDevice{VolumeSize: resource.NewScaledQuantity(10, resource.Giga)}}}}}),
 				Entry("BlockDeviceMapping VolumeType", v1beta1.EC2NodeClass{Spec: v1beta1.EC2NodeClassSpec{BlockDeviceMappings: []*v1beta1.BlockDeviceMapping{{EBS: &v1beta1.BlockDevice{VolumeType: lo.ToPtr("io1")}}}}}),
 			)
+			// We create a separate test for updating blockDeviceMapping volumeSize, since resource.Quantity is a struct, and mergo.WithSliceDeepCopy
+			// doesn't work well with unexported fields, like the ones that are present in resource.Quantity
+			It("should return drifted when updating blockDeviceMapping volumeSize", func() {
+				nodeClass.Spec.BlockDeviceMappings[0].EBS.VolumeSize = resource.NewScaledQuantity(10, resource.Giga)
+				nodeClass.Annotations = lo.Assign(nodeClass.Annotations, map[string]string{v1beta1.AnnotationEC2NodeClassHash: nodeClass.Hash()})
+
+				ExpectApplied(ctx, env.Client, nodeClass)
+				isDrifted, err := cloudProvider.IsDrifted(ctx, nodeClaim)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(isDrifted).To(Equal(cloudprovider.NodeClassDrift))
+			})
 			DescribeTable("should not return drifted if dynamic fields are updated",
 				func(changes v1beta1.EC2NodeClass) {
 					ExpectApplied(ctx, env.Client, nodePool, nodeClass)
@@ -914,13 +1009,16 @@ var _ = Describe("CloudProvider", func() {
 			Expect(foundNonGPULT).To(BeTrue())
 		})
 		It("should launch instances into subnet with the most available IP addresses", func() {
+			awsEnv.SubnetCache.Flush()
 			awsEnv.EC2API.DescribeSubnetsOutput.Set(&ec2.DescribeSubnetsOutput{Subnets: []*ec2.Subnet{
 				{SubnetId: aws.String("test-subnet-1"), AvailabilityZone: aws.String("test-zone-1a"), AvailableIpAddressCount: aws.Int64(10),
 					Tags: []*ec2.Tag{{Key: aws.String("Name"), Value: aws.String("test-subnet-1")}}},
 				{SubnetId: aws.String("test-subnet-2"), AvailabilityZone: aws.String("test-zone-1a"), AvailableIpAddressCount: aws.Int64(100),
 					Tags: []*ec2.Tag{{Key: aws.String("Name"), Value: aws.String("test-subnet-2")}}},
 			}})
+			controller := status.NewController(env.Client, awsEnv.SubnetProvider, awsEnv.SecurityGroupProvider, awsEnv.AMIProvider, awsEnv.InstanceProfileProvider, awsEnv.LaunchTemplateProvider)
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+			ExpectReconcileSucceeded(ctx, controller, client.ObjectKeyFromObject(nodeClass))
 			pod := coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: map[string]string{v1.LabelTopologyZone: "test-zone-1a"}})
 			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 			ExpectScheduled(ctx, env.Client, pod)
@@ -928,14 +1026,17 @@ var _ = Describe("CloudProvider", func() {
 			Expect(fake.SubnetsFromFleetRequest(createFleetInput)).To(ConsistOf("test-subnet-2"))
 		})
 		It("should launch instances into subnet with the most available IP addresses in-between cache refreshes", func() {
+			awsEnv.SubnetCache.Flush()
 			awsEnv.EC2API.DescribeSubnetsOutput.Set(&ec2.DescribeSubnetsOutput{Subnets: []*ec2.Subnet{
 				{SubnetId: aws.String("test-subnet-1"), AvailabilityZone: aws.String("test-zone-1a"), AvailableIpAddressCount: aws.Int64(10),
 					Tags: []*ec2.Tag{{Key: aws.String("Name"), Value: aws.String("test-subnet-1")}}},
 				{SubnetId: aws.String("test-subnet-2"), AvailabilityZone: aws.String("test-zone-1a"), AvailableIpAddressCount: aws.Int64(11),
 					Tags: []*ec2.Tag{{Key: aws.String("Name"), Value: aws.String("test-subnet-2")}}},
 			}})
+			controller := status.NewController(env.Client, awsEnv.SubnetProvider, awsEnv.SecurityGroupProvider, awsEnv.AMIProvider, awsEnv.InstanceProfileProvider, awsEnv.LaunchTemplateProvider)
 			nodePool.Spec.Template.Spec.Kubelet = &corev1beta1.KubeletConfiguration{MaxPods: aws.Int32(1)}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+			ExpectReconcileSucceeded(ctx, controller, client.ObjectKeyFromObject(nodeClass))
 			pod1 := coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: map[string]string{v1.LabelTopologyZone: "test-zone-1a"}})
 			pod2 := coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: map[string]string{v1.LabelTopologyZone: "test-zone-1a"}})
 			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod1, pod2)
@@ -970,6 +1071,8 @@ var _ = Describe("CloudProvider", func() {
 			}})
 			nodeClass.Spec.SubnetSelectorTerms = []v1beta1.SubnetSelectorTerm{{Tags: map[string]string{"Name": "test-subnet-1"}}}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+			controller := status.NewController(env.Client, awsEnv.SubnetProvider, awsEnv.SecurityGroupProvider, awsEnv.AMIProvider, awsEnv.InstanceProfileProvider, awsEnv.LaunchTemplateProvider)
+			ExpectReconcileSucceeded(ctx, controller, client.ObjectKeyFromObject(nodeClass))
 			podSubnet1 := coretest.UnschedulablePod()
 			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, podSubnet1)
 			ExpectScheduled(ctx, env.Client, podSubnet1)
@@ -989,6 +1092,13 @@ var _ = Describe("CloudProvider", func() {
 						},
 					},
 				},
+				Status: v1beta1.EC2NodeClassStatus{
+					SecurityGroups: []v1beta1.SecurityGroup{
+						{
+							ID: "sg-test1",
+						},
+					},
+				},
 			})
 			nodePool2 := coretest.NodePool(corev1beta1.NodePool{
 				Spec: corev1beta1.NodePoolSpec{
@@ -1002,6 +1112,7 @@ var _ = Describe("CloudProvider", func() {
 				},
 			})
 			ExpectApplied(ctx, env.Client, nodePool2, nodeClass2)
+			ExpectReconcileSucceeded(ctx, controller, client.ObjectKeyFromObject(nodeClass2))
 			podSubnet2 := coretest.UnschedulablePod(coretest.PodOptions{NodeSelector: map[string]string{corev1beta1.NodePoolLabelKey: nodePool2.Name}})
 			ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, podSubnet2)
 			ExpectScheduled(ctx, env.Client, podSubnet2)

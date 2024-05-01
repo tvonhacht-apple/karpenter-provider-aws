@@ -45,6 +45,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
+	corecloudprovider "sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/controllers/provisioning"
 	"sigs.k8s.io/karpenter/pkg/controllers/state"
 	"sigs.k8s.io/karpenter/pkg/events"
@@ -56,11 +57,14 @@ import (
 	"github.com/aws/karpenter-provider-aws/pkg/apis"
 	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
 	"github.com/aws/karpenter-provider-aws/pkg/cloudprovider"
+	"github.com/aws/karpenter-provider-aws/pkg/controllers/nodeclass/status"
 	"github.com/aws/karpenter-provider-aws/pkg/fake"
 	"github.com/aws/karpenter-provider-aws/pkg/operator/options"
+	"github.com/aws/karpenter-provider-aws/pkg/providers/amifamily"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/amifamily/bootstrap"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/amifamily/bootstrap/mime"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/instancetype"
+	"github.com/aws/karpenter-provider-aws/pkg/providers/launchtemplate"
 	"github.com/aws/karpenter-provider-aws/pkg/test"
 )
 
@@ -76,7 +80,7 @@ var cloudProvider *cloudprovider.CloudProvider
 func TestAWS(t *testing.T) {
 	ctx = TestContextWithLogger(t)
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Provider/AWS")
+	RunSpecs(t, "LaunchTemplateProvider")
 }
 
 var _ = BeforeSuite(func() {
@@ -113,11 +117,42 @@ var _ = AfterEach(func() {
 	ExpectCleanedUp(ctx, env.Client)
 })
 
-var _ = Describe("LaunchTemplates", func() {
+var _ = Describe("LaunchTemplate Provider", func() {
 	var nodePool *corev1beta1.NodePool
 	var nodeClass *v1beta1.EC2NodeClass
 	BeforeEach(func() {
-		nodeClass = test.EC2NodeClass()
+		nodeClass = test.EC2NodeClass(
+			v1beta1.EC2NodeClass{
+				Status: v1beta1.EC2NodeClassStatus{
+					InstanceProfile: "test-profile",
+					SecurityGroups: []v1beta1.SecurityGroup{
+						{
+							ID: "sg-test1",
+						},
+						{
+							ID: "sg-test2",
+						},
+						{
+							ID: "sg-test3",
+						},
+					},
+					Subnets: []v1beta1.Subnet{
+						{
+							ID:   "subnet-test1",
+							Zone: "test-zone-1a",
+						},
+						{
+							ID:   "subnet-test2",
+							Zone: "test-zone-1b",
+						},
+						{
+							ID:   "subnet-test3",
+							Zone: "test-zone-1c",
+						},
+					},
+				},
+			},
+		)
 		nodePool = coretest.NodePool(corev1beta1.NodePool{
 			Spec: corev1beta1.NodePoolSpec{
 				Template: corev1beta1.NodeClaimTemplate{
@@ -135,6 +170,7 @@ var _ = Describe("LaunchTemplates", func() {
 								},
 							},
 						},
+						Kubelet: &corev1beta1.KubeletConfiguration{},
 						NodeClassRef: &corev1beta1.NodeClassReference{
 							Name: nodeClass.Name,
 						},
@@ -142,6 +178,10 @@ var _ = Describe("LaunchTemplates", func() {
 				},
 			},
 		})
+		_, err := awsEnv.SubnetProvider.List(ctx, nodeClass) // Hydrate the subnet cache
+		Expect(err).To(BeNil())
+		Expect(awsEnv.InstanceTypesProvider.UpdateInstanceTypes(ctx)).To(Succeed())
+		Expect(awsEnv.InstanceTypesProvider.UpdateInstanceTypeOfferings(ctx)).To(Succeed())
 	})
 	It("should create unique launch templates for multiple identical nodeClasses", func() {
 		nodeClass2 := test.EC2NodeClass()
@@ -165,6 +205,32 @@ var _ = Describe("LaunchTemplates", func() {
 				},
 			},
 		})
+		nodeClass2.Status.SecurityGroups = []v1beta1.SecurityGroup{
+			{
+				ID: "sg-test1",
+			},
+			{
+				ID: "sg-test2",
+			},
+			{
+				ID: "sg-test3",
+			},
+		}
+		nodeClass2.Status.Subnets = []v1beta1.Subnet{
+			{
+				ID:   "subnet-test1",
+				Zone: "test-zone-1a",
+			},
+			{
+				ID:   "subnet-test2",
+				Zone: "test-zone-1b",
+			},
+			{
+				ID:   "subnet-test3",
+				Zone: "test-zone-1c",
+			},
+		}
+
 		pods := []*v1.Pod{
 			coretest.UnschedulablePod(coretest.PodOptions{NodeRequirements: []v1.NodeSelectorRequirement{
 				{
@@ -315,6 +381,109 @@ var _ = Describe("LaunchTemplates", func() {
 			Expect(awsEnv.EC2API.CreateFleetBehavior.FailedCalls()).To(BeNumerically("==", 1))
 			Expect(awsEnv.EC2API.CreateFleetBehavior.SuccessfulCalls()).To(BeNumerically("==", 2))
 
+		})
+		// Testing launch template hash key will produce unique hashes
+		It("should generate different launch template names based on amifamily option configuration", func() {
+			options := []*amifamily.Options{
+				{},
+				{ClusterName: "test-name"},
+				{ClusterEndpoint: "test-endpoint"},
+				{ClusterCIDR: lo.ToPtr("test-cidr")},
+				{InstanceProfile: "test-profile"},
+				{InstanceStorePolicy: lo.ToPtr(v1beta1.InstanceStorePolicyRAID0)},
+				{SecurityGroups: []v1beta1.SecurityGroup{{Name: "test-sg"}}},
+				{Tags: map[string]string{"test-key": "test-value"}},
+				{KubeDNSIP: net.ParseIP("192.0.0.2")},
+				{AssociatePublicIPAddress: lo.ToPtr(true)},
+				{NodeClassName: "test-name"},
+			}
+			launchtemplateResult := []string{}
+			for _, option := range options {
+				lt := &amifamily.LaunchTemplate{Options: option}
+				launchtemplateResult = append(launchtemplateResult, launchtemplate.LaunchTemplateName(lt))
+			}
+			Expect(len(launchtemplateResult)).To(BeNumerically("==", 11))
+			Expect(lo.Uniq(launchtemplateResult)).To(Equal(launchtemplateResult))
+		})
+		It("should not generate different launch template names based on CABundle and Labels", func() {
+			options := []*amifamily.Options{
+				{},
+				{CABundle: lo.ToPtr("test-bundle")},
+				{Labels: map[string]string{"test-key": "test-value"}},
+			}
+			launchtemplateResult := []string{}
+			for _, option := range options {
+				lt := &amifamily.LaunchTemplate{Options: option}
+				launchtemplateResult = append(launchtemplateResult, launchtemplate.LaunchTemplateName(lt))
+			}
+			Expect(len(lo.Uniq(launchtemplateResult))).To(BeNumerically("==", 1))
+			Expect(lo.Uniq(launchtemplateResult)[0]).To(Equal(launchtemplate.LaunchTemplateName(&amifamily.LaunchTemplate{Options: &amifamily.Options{}})))
+		})
+		It("should generate different launch template names based on kubelet configuration", func() {
+			kubeletChanges := []*corev1beta1.KubeletConfiguration{
+				{},
+				{KubeReserved: map[string]string{string(v1.ResourceCPU): "20"}},
+				{SystemReserved: map[string]string{string(v1.ResourceMemory): "10Gi"}},
+				{EvictionHard: map[string]string{"memory.available": "52%"}},
+				{EvictionSoft: map[string]string{"nodefs.available": "132%"}},
+				{MaxPods: aws.Int32(20)},
+			}
+			launchtemplateResult := []string{}
+			for _, kubelet := range kubeletChanges {
+				lt := &amifamily.LaunchTemplate{UserData: bootstrap.EKS{Options: bootstrap.Options{KubeletConfig: kubelet}}}
+				launchtemplateResult = append(launchtemplateResult, launchtemplate.LaunchTemplateName(lt))
+			}
+			Expect(len(launchtemplateResult)).To(BeNumerically("==", 6))
+			Expect(lo.Uniq(launchtemplateResult)).To(Equal(launchtemplateResult))
+		})
+		It("should generate different launch template names based on bootstrap configuration", func() {
+			bootstrapOptions := []*bootstrap.Options{
+				{},
+				{ClusterName: "test-name"},
+				{ClusterEndpoint: "test-endpoint"},
+				{ClusterCIDR: lo.ToPtr("test-cidr")},
+				{Taints: []v1.Taint{{Key: "test-key", Value: "test-value"}}},
+				{Labels: map[string]string{"test-key": "test-value"}},
+				{CABundle: lo.ToPtr("test-bundle")},
+				{AWSENILimitedPodDensity: true},
+				{ContainerRuntime: lo.ToPtr("test-cri")},
+				{CustomUserData: lo.ToPtr("test-cidr")},
+			}
+			launchtemplateResult := []string{}
+			for _, option := range bootstrapOptions {
+				lt := &amifamily.LaunchTemplate{UserData: bootstrap.EKS{Options: *option}}
+				launchtemplateResult = append(launchtemplateResult, launchtemplate.LaunchTemplateName(lt))
+			}
+			Expect(len(launchtemplateResult)).To(BeNumerically("==", 10))
+			Expect(lo.Uniq(launchtemplateResult)).To(Equal(launchtemplateResult))
+		})
+		It("should generate different launch template names based on launchtemplate option configuration", func() {
+			launchtemplates := []*amifamily.LaunchTemplate{
+				{},
+				{BlockDeviceMappings: []*v1beta1.BlockDeviceMapping{{DeviceName: lo.ToPtr("test-block")}}},
+				{AMIID: "test-ami"},
+				{DetailedMonitoring: true},
+				{EFACount: 12},
+				{CapacityType: "spot"},
+			}
+			launchtemplateResult := []string{}
+			for _, lt := range launchtemplates {
+				launchtemplateResult = append(launchtemplateResult, launchtemplate.LaunchTemplateName(lt))
+			}
+			Expect(len(launchtemplateResult)).To(BeNumerically("==", 6))
+			Expect(lo.Uniq(launchtemplateResult)).To(Equal(launchtemplateResult))
+		})
+		It("should not generate different launch template names based on instance types", func() {
+			launchtemplates := []*amifamily.LaunchTemplate{
+				{},
+				{InstanceTypes: []*corecloudprovider.InstanceType{{Name: "test-instance-type"}}},
+			}
+			launchtemplateResult := []string{}
+			for _, lt := range launchtemplates {
+				launchtemplateResult = append(launchtemplateResult, launchtemplate.LaunchTemplateName(lt))
+			}
+			Expect(len(lo.Uniq(launchtemplateResult))).To(BeNumerically("==", 1))
+			Expect(lo.Uniq(launchtemplateResult)[0]).To(Equal(launchtemplate.LaunchTemplateName(&amifamily.LaunchTemplate{})))
 		})
 	})
 	Context("Labels", func() {
@@ -822,7 +991,22 @@ var _ = Describe("LaunchTemplates", func() {
 			}))
 
 			nodeClass.Spec.AMIFamily = &v1beta1.AMIFamilyAL2
-			it := instancetype.NewInstanceType(ctx, info, nodePool.Spec.Template.Spec.Kubelet, "", nodeClass, nil)
+			amiFamily := amifamily.GetAMIFamily(nodeClass.Spec.AMIFamily, &amifamily.Options{})
+			it := instancetype.NewInstanceType(ctx,
+				info,
+				"",
+				nodeClass.Spec.BlockDeviceMappings,
+				nodeClass.Spec.InstanceStorePolicy,
+				nodePool.Spec.Template.Spec.Kubelet.MaxPods,
+				nodePool.Spec.Template.Spec.Kubelet.PodsPerCore,
+				nodePool.Spec.Template.Spec.Kubelet.KubeReserved,
+				nodePool.Spec.Template.Spec.Kubelet.SystemReserved,
+				nodePool.Spec.Template.Spec.Kubelet.EvictionHard,
+				nodePool.Spec.Template.Spec.Kubelet.EvictionSoft,
+				amiFamily,
+				nil,
+			)
+
 			overhead := it.Overhead.Total()
 			Expect(overhead.Memory().String()).To(Equal("993Mi"))
 		})
@@ -860,7 +1044,22 @@ var _ = Describe("LaunchTemplates", func() {
 			}))
 
 			nodeClass.Spec.AMIFamily = &v1beta1.AMIFamilyBottlerocket
-			it := instancetype.NewInstanceType(ctx, info, nodePool.Spec.Template.Spec.Kubelet, "", nodeClass, nil)
+			amiFamily := amifamily.GetAMIFamily(nodeClass.Spec.AMIFamily, &amifamily.Options{})
+			it := instancetype.NewInstanceType(ctx,
+				info,
+				"",
+				nodeClass.Spec.BlockDeviceMappings,
+				nodeClass.Spec.InstanceStorePolicy,
+				nodePool.Spec.Template.Spec.Kubelet.MaxPods,
+				nodePool.Spec.Template.Spec.Kubelet.PodsPerCore,
+				nodePool.Spec.Template.Spec.Kubelet.KubeReserved,
+				nodePool.Spec.Template.Spec.Kubelet.SystemReserved,
+				nodePool.Spec.Template.Spec.Kubelet.EvictionHard,
+				nodePool.Spec.Template.Spec.Kubelet.EvictionSoft,
+				amiFamily,
+				nil,
+			)
+
 			overhead := it.Overhead.Total()
 			Expect(overhead.Memory().String()).To(Equal("993Mi"))
 		})
@@ -871,7 +1070,21 @@ var _ = Describe("LaunchTemplates", func() {
 
 			nodeClass.Spec.AMIFamily = &v1beta1.AMIFamilyBottlerocket
 			nodePool.Spec.Template.Spec.Kubelet = &corev1beta1.KubeletConfiguration{MaxPods: lo.ToPtr[int32](110)}
-			it := instancetype.NewInstanceType(ctx, info, nodePool.Spec.Template.Spec.Kubelet, "", nodeClass, nil)
+			amiFamily := amifamily.GetAMIFamily(nodeClass.Spec.AMIFamily, &amifamily.Options{})
+			it := instancetype.NewInstanceType(ctx,
+				info,
+				"",
+				nodeClass.Spec.BlockDeviceMappings,
+				nodeClass.Spec.InstanceStorePolicy,
+				nodePool.Spec.Template.Spec.Kubelet.MaxPods,
+				nodePool.Spec.Template.Spec.Kubelet.PodsPerCore,
+				nodePool.Spec.Template.Spec.Kubelet.KubeReserved,
+				nodePool.Spec.Template.Spec.Kubelet.SystemReserved,
+				nodePool.Spec.Template.Spec.Kubelet.EvictionHard,
+				nodePool.Spec.Template.Spec.Kubelet.EvictionSoft,
+				amiFamily,
+				nil,
+			)
 			overhead := it.Overhead.Total()
 			Expect(overhead.Memory().String()).To(Equal("1565Mi"))
 		})
@@ -894,10 +1107,10 @@ var _ = Describe("LaunchTemplates", func() {
 		})
 		It("should specify --system-reserved when overriding system reserved values", func() {
 			nodePool.Spec.Template.Spec.Kubelet = &corev1beta1.KubeletConfiguration{
-				SystemReserved: v1.ResourceList{
-					v1.ResourceCPU:              resource.MustParse("500m"),
-					v1.ResourceMemory:           resource.MustParse("1Gi"),
-					v1.ResourceEphemeralStorage: resource.MustParse("2Gi"),
+				SystemReserved: map[string]string{
+					string(v1.ResourceCPU):              "500m",
+					string(v1.ResourceMemory):           "1Gi",
+					string(v1.ResourceEphemeralStorage): "2Gi",
 				},
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
@@ -915,16 +1128,16 @@ var _ = Describe("LaunchTemplates", func() {
 				rem := string(userData)[(i + len(arg)):]
 				i = strings.Index(rem, "'")
 				for k, v := range nodePool.Spec.Template.Spec.Kubelet.SystemReserved {
-					Expect(rem[:i]).To(ContainSubstring(fmt.Sprintf("%v=%v", k.String(), v.String())))
+					Expect(rem[:i]).To(ContainSubstring(fmt.Sprintf("%v=%v", k, v)))
 				}
 			})
 		})
 		It("should specify --kube-reserved when overriding system reserved values", func() {
 			nodePool.Spec.Template.Spec.Kubelet = &corev1beta1.KubeletConfiguration{
-				KubeReserved: v1.ResourceList{
-					v1.ResourceCPU:              resource.MustParse("500m"),
-					v1.ResourceMemory:           resource.MustParse("1Gi"),
-					v1.ResourceEphemeralStorage: resource.MustParse("2Gi"),
+				KubeReserved: map[string]string{
+					string(v1.ResourceCPU):              "500m",
+					string(v1.ResourceMemory):           "1Gi",
+					string(v1.ResourceEphemeralStorage): "2Gi",
 				},
 			}
 			ExpectApplied(ctx, env.Client, nodePool, nodeClass)
@@ -942,7 +1155,7 @@ var _ = Describe("LaunchTemplates", func() {
 				rem := string(userData)[(i + len(arg)):]
 				i = strings.Index(rem, "'")
 				for k, v := range nodePool.Spec.Template.Spec.Kubelet.KubeReserved {
-					Expect(rem[:i]).To(ContainSubstring(fmt.Sprintf("%v=%v", k.String(), v.String())))
+					Expect(rem[:i]).To(ContainSubstring(fmt.Sprintf("%v=%v", k, v)))
 				}
 			})
 		})
@@ -1189,10 +1402,10 @@ var _ = Describe("LaunchTemplates", func() {
 			It("should override system reserved values in user data", func() {
 				ExpectApplied(ctx, env.Client, nodeClass)
 				nodePool.Spec.Template.Spec.Kubelet = &corev1beta1.KubeletConfiguration{
-					SystemReserved: v1.ResourceList{
-						v1.ResourceCPU:              resource.MustParse("2"),
-						v1.ResourceMemory:           resource.MustParse("3Gi"),
-						v1.ResourceEphemeralStorage: resource.MustParse("10Gi"),
+					SystemReserved: map[string]string{
+						string(v1.ResourceCPU):              "2",
+						string(v1.ResourceMemory):           "3Gi",
+						string(v1.ResourceEphemeralStorage): "10Gi",
 					},
 				}
 				ExpectApplied(ctx, env.Client, nodePool)
@@ -1214,10 +1427,10 @@ var _ = Describe("LaunchTemplates", func() {
 			It("should override kube reserved values in user data", func() {
 				ExpectApplied(ctx, env.Client, nodeClass)
 				nodePool.Spec.Template.Spec.Kubelet = &corev1beta1.KubeletConfiguration{
-					KubeReserved: v1.ResourceList{
-						v1.ResourceCPU:              resource.MustParse("2"),
-						v1.ResourceMemory:           resource.MustParse("3Gi"),
-						v1.ResourceEphemeralStorage: resource.MustParse("10Gi"),
+					KubeReserved: map[string]string{
+						string(v1.ResourceCPU):              "2",
+						string(v1.ResourceMemory):           "3Gi",
+						string(v1.ResourceEphemeralStorage): "10Gi",
 					},
 				}
 				ExpectApplied(ctx, env.Client, nodePool)
@@ -1501,17 +1714,17 @@ var _ = Describe("LaunchTemplates", func() {
 						}
 					},
 					Entry("systemReserved", "systemReserved", corev1beta1.KubeletConfiguration{
-						SystemReserved: v1.ResourceList{
-							v1.ResourceCPU:              resource.MustParse("500m"),
-							v1.ResourceMemory:           resource.MustParse("1Gi"),
-							v1.ResourceEphemeralStorage: resource.MustParse("2Gi"),
+						SystemReserved: map[string]string{
+							string(v1.ResourceCPU):              "500m",
+							string(v1.ResourceMemory):           "1Gi",
+							string(v1.ResourceEphemeralStorage): "2Gi",
 						},
 					}),
 					Entry("kubeReserved", "kubeReserved", corev1beta1.KubeletConfiguration{
-						KubeReserved: v1.ResourceList{
-							v1.ResourceCPU:              resource.MustParse("500m"),
-							v1.ResourceMemory:           resource.MustParse("1Gi"),
-							v1.ResourceEphemeralStorage: resource.MustParse("2Gi"),
+						KubeReserved: map[string]string{
+							string(v1.ResourceCPU):              "500m",
+							string(v1.ResourceMemory):           "1Gi",
+							string(v1.ResourceEphemeralStorage): "2Gi",
 						},
 					}),
 					Entry("evictionHard", "evictionHard", corev1beta1.KubeletConfiguration{
@@ -1798,6 +2011,8 @@ var _ = Describe("LaunchTemplates", func() {
 					{Tags: map[string]string{"Name": "test-subnet-3"}},
 				}
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+				controller := status.NewController(env.Client, awsEnv.SubnetProvider, awsEnv.SecurityGroupProvider, awsEnv.AMIProvider, awsEnv.InstanceProfileProvider, awsEnv.LaunchTemplateProvider)
+				ExpectReconcileSucceeded(ctx, controller, client.ObjectKeyFromObject(nodeClass))
 				pod := coretest.UnschedulablePod()
 				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 				ExpectScheduled(ctx, env.Client, pod)
@@ -1809,6 +2024,8 @@ var _ = Describe("LaunchTemplates", func() {
 					{Tags: map[string]string{"Name": "test-subnet-2"}},
 				}
 				ExpectApplied(ctx, env.Client, nodePool, nodeClass)
+				controller := status.NewController(env.Client, awsEnv.SubnetProvider, awsEnv.SecurityGroupProvider, awsEnv.AMIProvider, awsEnv.InstanceProfileProvider, awsEnv.LaunchTemplateProvider)
+				ExpectReconcileSucceeded(ctx, controller, client.ObjectKeyFromObject(nodeClass))
 				pod := coretest.UnschedulablePod()
 				ExpectProvisioned(ctx, env.Client, cluster, cloudProvider, prov, pod)
 				ExpectScheduled(ctx, env.Client, pod)

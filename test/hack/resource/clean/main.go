@@ -35,7 +35,7 @@ import (
 const sweeperCleanedResourcesTableName = "sweeperCleanedResources"
 
 var excludedClusters = []string{
-	"soak-periodic-2213793",
+	"soak-periodic-2785632730",
 }
 
 func main() {
@@ -75,6 +75,7 @@ func main() {
 		resourcetypes.NewOIDC(iamClient),
 		resourcetypes.NewInstanceProfile(iamClient),
 		resourcetypes.NewStack(cloudFormationClient),
+		resourcetypes.NewVPCPeeringConnection(ec2Client),
 	}
 
 	for i := range resourceTypes {

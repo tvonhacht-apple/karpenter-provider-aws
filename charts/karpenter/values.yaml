@@ -27,7 +27,9 @@ serviceMonitor:
   enabled: false
   # -- Additional labels for the ServiceMonitor.
   additionalLabels: {}
-  # -- Endpoint configuration for the ServiceMonitor.
+  # -- Configuration on `http-metrics` endpoint for the ServiceMonitor. 
+  # Not to be used to add additional endpoints. 
+  # See the Prometheus operator documentation for configurable fields https://github.com/prometheus-operator/prometheus-operator/blob/main/Documentation/api.md#endpoint
   endpointConfig: {}
 # -- Number of replicas.
 replicas: 2
@@ -99,9 +101,9 @@ controller:
     # -- Repository path to the controller image.
     repository: public.ecr.aws/karpenter/controller
     # -- Tag of the controller image.
-    tag: 0.35.2
+    tag: 0.36.0
     # -- SHA256 digest of the controller image.
-    digest: sha256:38b7f77ef417c1d52b8f6ba1174b2a070dd6179c230525dace863897891d7c5b
+    digest: sha256:90adaba9e8e9f66244324ca64408a5abbfe063f8c41fbbfebf226bdda4fadd58
   # -- Additional environment variables for the controller pod.
   env: []
   # - name: AWS_REGION
@@ -189,7 +191,8 @@ settings:
   isolatedVPC: false
   # -- The VM memory overhead as a percent that will be subtracted from the total memory for all instance types
   vmMemoryOverheadPercent: 0.075
-  # -- interruptionQueue is disabled if not specified. Enabling interruption handling may
+  # -- Interruption queue is the name of the SQS queue used for processing interruption events from EC2
+  # Interruption handling is disabled if not specified. Enabling interruption handling may
   # require additional permissions on the controller service account. Additional permissions are outlined in the docs.
   interruptionQueue: ""
   # -- Reserved ENIs are not included in the calculations for max-pods or kube-reserved

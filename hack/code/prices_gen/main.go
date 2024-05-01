@@ -34,7 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	controllerspricing "github.com/aws/karpenter-provider-aws/pkg/controllers/pricing"
+	controllerspricing "github.com/aws/karpenter-provider-aws/pkg/controllers/providers/pricing"
 	"github.com/aws/karpenter-provider-aws/pkg/operator/options"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/pricing"
 	"github.com/aws/karpenter-provider-aws/pkg/test"
@@ -108,7 +108,7 @@ func main() {
 	// record prices for each region we are interested in
 	for _, region := range getAWSRegions(opts.partition) {
 		log.Println("fetching for", region)
-		pricingProvider := pricing.NewProvider(ctx, pricing.NewAPI(sess, region), ec2, region)
+		pricingProvider := pricing.NewDefaultProvider(ctx, pricing.NewAPI(sess, region), ec2, region)
 		controller := controllerspricing.NewController(pricingProvider)
 		_, err := controller.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{}})
 		if err != nil {

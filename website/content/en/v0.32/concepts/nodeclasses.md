@@ -35,7 +35,7 @@ spec:
   # Each term in the array of subnetSelectorTerms is ORed together
   # Within a single term, all conditions are ANDed
   subnetSelectorTerms:
-    # Select on any subnet that has the "karpenter.sh/discovery: ${CLUSTER_NAME}" 
+    # Select on any subnet that has the "karpenter.sh/discovery: ${CLUSTER_NAME}"
     # AND the "environment: test" tag OR any subnet with ID "subnet-09fa4a0a8f233a921"
     - tags:
         karpenter.sh/discovery: "${CLUSTER_NAME}"
@@ -46,8 +46,8 @@ spec:
   # Each term in the array of securityGroupSelectorTerms is ORed together
   # Within a single term, all conditions are ANDed
   securityGroupSelectorTerms:
-    # Select on any security group that has both the "karpenter.sh/discovery: ${CLUSTER_NAME}" tag 
-    # AND the "environment: test" tag OR any security group with the "my-security-group" name 
+    # Select on any security group that has both the "karpenter.sh/discovery: ${CLUSTER_NAME}" tag
+    # AND the "environment: test" tag OR any security group with the "my-security-group" name
     # OR any security group with ID "sg-063d7acfb4b06c82c"
     - tags:
         karpenter.sh/discovery: "${CLUSTER_NAME}"
@@ -70,8 +70,8 @@ spec:
   # Each term in the array of amiSelectorTerms is ORed together
   # Within a single term, all conditions are ANDed
   amiSelectorTerms:
-    # Select on any AMI that has both the "karpenter.sh/discovery: ${CLUSTER_NAME}" tag 
-    # AND the "environment: test" tag OR any AMI with the "my-ami" name 
+    # Select on any AMI that has both the "karpenter.sh/discovery: ${CLUSTER_NAME}" tag
+    # AND the "environment: test" tag OR any AMI with the "my-ami" name
     # OR any AMI with ID "ami-123"
     - tags:
         karpenter.sh/discovery: "${CLUSTER_NAME}"
@@ -246,7 +246,7 @@ This selection logic is modeled as terms, where each term contains multiple cond
 
 ```yaml
 subnetSelectorTerms:
-  # Select on any subnet that has the "karpenter.sh/discovery: ${CLUSTER_NAME}" 
+  # Select on any subnet that has the "karpenter.sh/discovery: ${CLUSTER_NAME}"
   # AND the "environment: test" tag OR any subnet with ID "subnet-09fa4a0a8f233a921"
   - tags:
       karpenter.sh/discovery: "${CLUSTER_NAME}"
@@ -313,8 +313,8 @@ This selection logic is modeled as terms, where each term contains multiple cond
 
 ```yaml
 securityGroupSelectorTerms:
-  # Select on any security group that has both the "karpenter.sh/discovery: ${CLUSTER_NAME}" tag 
-  # AND the "environment: test" tag OR any security group with the "my-security-group" name 
+  # Select on any security group that has both the "karpenter.sh/discovery: ${CLUSTER_NAME}" tag
+  # AND the "environment: test" tag OR any security group with the "my-security-group" name
   # OR any security group with ID "sg-063d7acfb4b06c82c"
   - tags:
       karpenter.sh/discovery: "${CLUSTER_NAME}"
@@ -396,12 +396,16 @@ spec:
 
 AMI Selector Terms are used to configure custom AMIs for Karpenter to use, where the AMIs are discovered through ids, owners, name, and [tags](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Using_Tags.html). **When you specify `amiSelectorTerms`, you fully override the default AMIs that are selected on by your EC2NodeClass [`amiFamily`]({{< ref "#specamifamily" >}}).**
 
+{{% alert title="Note" color="primary" %}}
+[`amiFamily`]({{< ref "#specamifamily" >}}) determines the bootstrapping mode, while `amiSelectorTerms` specifies specific AMIs to be used. Therefore, you need to ensure consistency between [`amiFamily`]({{< ref "#specamifamily" >}}) and `amiSelectorTerms` to avoid conflicts during bootstrapping.
+{{% /alert %}}
+
 This selection logic is modeled as terms, where each term contains multiple conditions that must all be satisfied for the selector to match. Effectively, all requirements within a single term are ANDed together. It's possible that you may want to select on two different AMIs that have unrelated requirements. In this case, you can specify multiple terms which will be ORed together to form your selection logic. The example below shows how this selection logic is fulfilled.
 
 ```yaml
 amiSelectorTerms:
-  # Select on any AMI that has both the "karpenter.sh/discovery: ${CLUSTER_NAME}" tag 
-  # AND the "environment: test" tag OR any AMI with the "my-ami" name 
+  # Select on any AMI that has both the "karpenter.sh/discovery: ${CLUSTER_NAME}" tag
+  # AND the "environment: test" tag OR any AMI with the "my-ami" name
   # OR any AMI with ID "ami-123"
   - tags:
       karpenter.sh/discovery: "${CLUSTER_NAME}"
@@ -422,6 +426,7 @@ AMIs may be specified by any AWS tag, including `Name`. Selecting by tag or by n
 If `amiSelectorTerms` match more than one AMI, Karpenter will automatically determine which AMI best fits the workloads on the launched worker node under the following constraints:
 
 * When launching nodes, Karpenter automatically determines which architecture a custom AMI is compatible with and will use images that match an instanceType's requirements.
+    * Note that Karpenter **cannot** detect any requirement other than architecture. If you need to specify different AMIs for different kind of nodes (e.g. accelerated GPU AMIs), you should use a separate `EC2NodeClass`.
 * If multiple AMIs are found that can be used, Karpenter will choose the latest one.
 * If no AMIs are found that can be used, then no nodes will be provisioned.
 {{% /alert %}}

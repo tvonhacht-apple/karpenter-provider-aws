@@ -66,7 +66,7 @@ const (
 var ctx context.Context
 var env *coretest.Environment
 var sqsapi *fake.SQSAPI
-var sqsProvider *sqs.Provider
+var sqsProvider *sqs.DefaultProvider
 var unavailableOfferingsCache *awscache.UnavailableOfferings
 var fakeClock *clock.FakeClock
 var controller *interruption.Controller
@@ -82,7 +82,7 @@ var _ = BeforeSuite(func() {
 	fakeClock = &clock.FakeClock{}
 	unavailableOfferingsCache = awscache.NewUnavailableOfferings()
 	sqsapi = &fake.SQSAPI{}
-	sqsProvider = lo.Must(sqs.NewProvider(ctx, sqsapi, "test-cluster"))
+	sqsProvider = lo.Must(sqs.NewDefaultProvider(sqsapi, fmt.Sprintf("https://sqs.%s.amazonaws.com/%s/test-cluster", fake.DefaultRegion, fake.DefaultAccount)))
 	controller = interruption.NewController(env.Client, fakeClock, events.NewRecorder(&record.FakeRecorder{}), sqsProvider, unavailableOfferingsCache)
 })
 

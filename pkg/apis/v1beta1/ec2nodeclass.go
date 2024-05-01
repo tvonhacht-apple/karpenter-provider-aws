@@ -21,6 +21,7 @@ import (
 	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
 )
 
 // EC2NodeClassSpec is the top level specification for the AWS Karpenter Provider.
@@ -291,9 +292,10 @@ type BlockDevice struct {
 	// + TODO: Add the CEL resources.quantity type after k8s 1.29
 	// + https://github.com/kubernetes/apiserver/commit/b137c256373aec1c5d5810afbabb8932a19ecd2a#diff-838176caa5882465c9d6061febd456397a3e2b40fb423ed36f0cabb1847ecb4dR190
 	// +kubebuilder:validation:Pattern:="^((?:[1-9][0-9]{0,3}|[1-4][0-9]{4}|[5][0-8][0-9]{3}|59000)Gi|(?:[1-9][0-9]{0,3}|[1-5][0-9]{4}|[6][0-3][0-9]{3}|64000)G|([1-9]||[1-5][0-7]|58)Ti|([1-9]||[1-5][0-9]|6[0-3]|64)T)$"
-	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:validation:Type:=string
 	// +optional
-	VolumeSize *resource.Quantity `json:"volumeSize,omitempty"`
+	VolumeSize *resource.Quantity `json:"volumeSize,omitempty" hash:"string"`
 	// VolumeType of the block device.
 	// For more information, see Amazon EBS volume types (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSVolumeTypes.html)
 	// in the Amazon Elastic Compute Cloud User Guide.
@@ -333,7 +335,7 @@ type EC2NodeClass struct {
 // 1. A field changes its default value for an existing field that is already hashed
 // 2. A field is added to the hash calculation with an already-set value
 // 3. A field is removed from the hash calculations
-const EC2NodeClassHashVersion = "v1"
+const EC2NodeClassHashVersion = "v2"
 
 func (in *EC2NodeClass) Hash() string {
 	return fmt.Sprint(lo.Must(hashstructure.Hash(in.Spec, hashstructure.FormatV2, &hashstructure.HashOptions{
@@ -341,6 +343,22 @@ func (in *EC2NodeClass) Hash() string {
 		IgnoreZeroValue: true,
 		ZeroNil:         true,
 	})))
+}
+
+func (in *EC2NodeClass) InstanceProfileName(clusterName, region string) string {
+	return fmt.Sprintf("%s_%d", clusterName, lo.Must(hashstructure.Hash(fmt.Sprintf("%s%s", region, in.Name), hashstructure.FormatV2, nil)))
+}
+
+func (in *EC2NodeClass) InstanceProfileRole() string {
+	return in.Spec.Role
+}
+
+func (in *EC2NodeClass) InstanceProfileTags(clusterName string) map[string]string {
+	return lo.Assign(in.Spec.Tags, map[string]string{
+		fmt.Sprintf("kubernetes.io/cluster/%s", clusterName): "owned",
+		corev1beta1.ManagedByAnnotationKey:                   clusterName,
+		LabelNodeClass:                                       in.Name,
+	})
 }
 
 // EC2NodeClassList contains a list of EC2NodeClass

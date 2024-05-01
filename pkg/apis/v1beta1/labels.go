@@ -49,11 +49,8 @@ func init() {
 	)
 }
 
-const (
-	TerminationFinalizer = Group + "/termination"
-)
-
 var (
+	TerminationFinalizer   = Group + "/termination"
 	AWSToKubeArchitectures = map[string]string{
 		"x86_64":                  v1beta1.ArchitectureAmd64,
 		v1beta1.ArchitectureArm64: v1beta1.ArchitectureArm64,
@@ -118,6 +115,7 @@ var (
 	AnnotationEC2NodeClassHashVersion         = Group + "/ec2nodeclass-hash-version"
 	AnnotationInstanceTagged                  = Group + "/tagged"
 
-	TagNodeClaim = v1beta1.Group + "/nodeclaim"
-	TagName      = "Name"
+	TagNodeClaim             = v1beta1.Group + "/nodeclaim"
+	TagManagedLaunchTemplate = Group + "/cluster"
+	TagName                  = "Name"
 )

@@ -58,26 +58,28 @@ type Environment struct {
 	PricingAPI *fake.PricingAPI
 
 	// Cache
-	EC2Cache                  *cache.Cache
-	KubernetesVersionCache    *cache.Cache
-	InstanceTypeCache         *cache.Cache
-	UnavailableOfferingsCache *awscache.UnavailableOfferings
-	LaunchTemplateCache       *cache.Cache
-	SubnetCache               *cache.Cache
-	SecurityGroupCache        *cache.Cache
-	InstanceProfileCache      *cache.Cache
+	EC2Cache                      *cache.Cache
+	KubernetesVersionCache        *cache.Cache
+	InstanceTypeCache             *cache.Cache
+	UnavailableOfferingsCache     *awscache.UnavailableOfferings
+	LaunchTemplateCache           *cache.Cache
+	SubnetCache                   *cache.Cache
+	AvailableIPAdressCache        *cache.Cache
+	AssociatePublicIPAddressCache *cache.Cache
+	SecurityGroupCache            *cache.Cache
+	InstanceProfileCache          *cache.Cache
 
 	// Providers
-	InstanceTypesProvider   *instancetype.Provider
-	InstanceProvider        *instance.Provider
-	SubnetProvider          *subnet.Provider
-	SecurityGroupProvider   *securitygroup.Provider
-	InstanceProfileProvider *instanceprofile.Provider
-	PricingProvider         *pricing.Provider
-	AMIProvider             *amifamily.Provider
+	InstanceTypesProvider   *instancetype.DefaultProvider
+	InstanceProvider        *instance.DefaultProvider
+	SubnetProvider          *subnet.DefaultProvider
+	SecurityGroupProvider   *securitygroup.DefaultProvider
+	InstanceProfileProvider *instanceprofile.DefaultProvider
+	PricingProvider         *pricing.DefaultProvider
+	AMIProvider             *amifamily.DefaultProvider
 	AMIResolver             *amifamily.Resolver
-	VersionProvider         *version.Provider
-	LaunchTemplateProvider  *launchtemplate.Provider
+	VersionProvider         *version.DefaultProvider
+	LaunchTemplateProvider  *launchtemplate.DefaultProvider
 }
 
 func NewEnvironment(ctx context.Context, env *coretest.Environment) *Environment {
@@ -94,21 +96,23 @@ func NewEnvironment(ctx context.Context, env *coretest.Environment) *Environment
 	unavailableOfferingsCache := awscache.NewUnavailableOfferings()
 	launchTemplateCache := cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval)
 	subnetCache := cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval)
+	availableIPAdressCache := cache.New(awscache.AvailableIPAddressTTL, awscache.DefaultCleanupInterval)
+	associatePublicIPAddressCache := cache.New(awscache.AssociatePublicIPAddressTTL, awscache.DefaultCleanupInterval)
 	securityGroupCache := cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval)
 	instanceProfileCache := cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval)
 	fakePricingAPI := &fake.PricingAPI{}
 
 	// Providers
-	pricingProvider := pricing.NewProvider(ctx, fakePricingAPI, ec2api, fake.DefaultRegion)
-	subnetProvider := subnet.NewProvider(ec2api, subnetCache)
-	securityGroupProvider := securitygroup.NewProvider(ec2api, securityGroupCache)
-	versionProvider := version.NewProvider(env.KubernetesInterface, kubernetesVersionCache)
-	instanceProfileProvider := instanceprofile.NewProvider(fake.DefaultRegion, iamapi, instanceProfileCache)
-	amiProvider := amifamily.NewProvider(versionProvider, ssmapi, ec2api, ec2Cache)
-	amiResolver := amifamily.New(amiProvider)
-	instanceTypesProvider := instancetype.NewProvider(fake.DefaultRegion, instanceTypeCache, ec2api, subnetProvider, unavailableOfferingsCache, pricingProvider)
+	pricingProvider := pricing.NewDefaultProvider(ctx, fakePricingAPI, ec2api, fake.DefaultRegion)
+	subnetProvider := subnet.NewDefaultProvider(ec2api, subnetCache, availableIPAdressCache, associatePublicIPAddressCache)
+	securityGroupProvider := securitygroup.NewDefaultProvider(ec2api, securityGroupCache)
+	versionProvider := version.NewDefaultProvider(env.KubernetesInterface, kubernetesVersionCache)
+	instanceProfileProvider := instanceprofile.NewDefaultProvider(fake.DefaultRegion, iamapi, instanceProfileCache)
+	amiProvider := amifamily.NewDefaultProvider(versionProvider, ssmapi, ec2api, ec2Cache)
+	amiResolver := amifamily.NewResolver(amiProvider)
+	instanceTypesProvider := instancetype.NewDefaultProvider(fake.DefaultRegion, instanceTypeCache, ec2api, subnetProvider, unavailableOfferingsCache, pricingProvider)
 	launchTemplateProvider :=
-		launchtemplate.NewProvider(
+		launchtemplate.NewDefaultProvider(
 			ctx,
 			launchTemplateCache,
 			ec2api,
@@ -116,14 +120,13 @@ func NewEnvironment(ctx context.Context, env *coretest.Environment) *Environment
 			amiResolver,
 			securityGroupProvider,
 			subnetProvider,
-			instanceProfileProvider,
 			ptr.String("ca-bundle"),
 			make(chan struct{}),
 			net.ParseIP("10.0.100.10"),
 			"https://test-cluster",
 		)
 	instanceProvider :=
-		instance.NewProvider(ctx,
+		instance.NewDefaultProvider(ctx,
 			"",
 			ec2api,
 			unavailableOfferingsCache,
@@ -139,14 +142,15 @@ func NewEnvironment(ctx context.Context, env *coretest.Environment) *Environment
 		IAMAPI:     iamapi,
 		PricingAPI: fakePricingAPI,
 
-		EC2Cache:                  ec2Cache,
-		KubernetesVersionCache:    kubernetesVersionCache,
-		InstanceTypeCache:         instanceTypeCache,
-		LaunchTemplateCache:       launchTemplateCache,
-		SubnetCache:               subnetCache,
-		SecurityGroupCache:        securityGroupCache,
-		InstanceProfileCache:      instanceProfileCache,
-		UnavailableOfferingsCache: unavailableOfferingsCache,
+		EC2Cache:                      ec2Cache,
+		KubernetesVersionCache:        kubernetesVersionCache,
+		LaunchTemplateCache:           launchTemplateCache,
+		SubnetCache:                   subnetCache,
+		AvailableIPAdressCache:        availableIPAdressCache,
+		AssociatePublicIPAddressCache: associatePublicIPAddressCache,
+		SecurityGroupCache:            securityGroupCache,
+		InstanceProfileCache:          instanceProfileCache,
+		UnavailableOfferingsCache:     unavailableOfferingsCache,
 
 		InstanceTypesProvider:   instanceTypesProvider,
 		InstanceProvider:        instanceProvider,
@@ -168,13 +172,15 @@ func (env *Environment) Reset() {
 	env.IAMAPI.Reset()
 	env.PricingAPI.Reset()
 	env.PricingProvider.Reset()
+	env.InstanceTypesProvider.Reset()
 
 	env.EC2Cache.Flush()
 	env.KubernetesVersionCache.Flush()
-	env.InstanceTypeCache.Flush()
 	env.UnavailableOfferingsCache.Flush()
 	env.LaunchTemplateCache.Flush()
 	env.SubnetCache.Flush()
+	env.AssociatePublicIPAddressCache.Flush()
+	env.AvailableIPAdressCache.Flush()
 	env.SecurityGroupCache.Flush()
 	env.InstanceProfileCache.Flush()
 
