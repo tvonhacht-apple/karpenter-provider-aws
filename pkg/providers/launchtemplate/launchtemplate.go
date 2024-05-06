@@ -174,17 +174,18 @@ func (p *DefaultProvider) createAMIOptions(ctx context.Context, nodeClass *v1bet
 		return nil, fmt.Errorf("no security groups are present in the status")
 	}
 	options := &amifamily.Options{
-		ClusterName:         options.FromContext(ctx).ClusterName,
-		ClusterEndpoint:     p.ClusterEndpoint,
-		ClusterCIDR:         p.ClusterCIDR.Load(),
-		InstanceProfile:     instanceProfile,
-		InstanceStorePolicy: nodeClass.Spec.InstanceStorePolicy,
-		SecurityGroups:      nodeClass.Status.SecurityGroups,
-		Tags:                tags,
-		Labels:              labels,
-		CABundle:            p.CABundle,
-		KubeDNSIP:           p.KubeDNSIP,
-		NodeClassName:       nodeClass.Name,
+		ClusterName:          options.FromContext(ctx).ClusterName,
+		ClusterEndpoint:      p.ClusterEndpoint,
+		ClusterCIDR:          p.ClusterCIDR.Load(),
+		InstanceProfile:      instanceProfile,
+		InstanceStorePolicy:  nodeClass.Spec.InstanceStorePolicy,
+		SecurityGroups:       nodeClass.Status.SecurityGroups,
+		CapacityReservations: nodeClass.Status.CapacityReservations,
+		Tags:                 tags,
+		Labels:               labels,
+		CABundle:             p.CABundle,
+		KubeDNSIP:            p.KubeDNSIP,
+		NodeClassName:        nodeClass.Name,
 	}
 	if nodeClass.Spec.AssociatePublicIPAddress != nil {
 		options.AssociatePublicIPAddress = nodeClass.Spec.AssociatePublicIPAddress
@@ -247,6 +248,7 @@ func (p *DefaultProvider) createLaunchTemplate(ctx context.Context, options *ami
 		launchTemplateDataTags = append(launchTemplateDataTags, &ec2.LaunchTemplateTagSpecificationRequest{ResourceType: aws.String(ec2.ResourceTypeSpotInstancesRequest), Tags: utils.MergeTags(options.Tags)})
 	}
 	networkInterfaces := p.generateNetworkInterfaces(options)
+	capacityReservationSpecification := p.generateCapacityReservationSpecification(options)
 	output, err := p.ec2api.CreateLaunchTemplateWithContext(ctx, &ec2.CreateLaunchTemplateInput{
 		LaunchTemplateName: aws.String(LaunchTemplateName(options)),
 		LaunchTemplateData: &ec2.RequestLaunchTemplateData{
@@ -258,9 +260,10 @@ func (p *DefaultProvider) createLaunchTemplate(ctx context.Context, options *ami
 				Enabled: aws.Bool(options.DetailedMonitoring),
 			},
 			// If the network interface is defined, the security groups are defined within it
-			SecurityGroupIds: lo.Ternary(networkInterfaces != nil, nil, lo.Map(options.SecurityGroups, func(s v1beta1.SecurityGroup, _ int) *string { return aws.String(s.ID) })),
-			UserData:         aws.String(userData),
-			ImageId:          aws.String(options.AMIID),
+			SecurityGroupIds:                 lo.Ternary(networkInterfaces != nil, nil, lo.Map(options.SecurityGroups, func(s v1beta1.SecurityGroup, _ int) *string { return aws.String(s.ID) })),
+			CapacityReservationSpecification: capacityReservationSpecification,
+			UserData:                         aws.String(userData),
+			ImageId:                          aws.String(options.AMIID),
 			MetadataOptions: &ec2.LaunchTemplateInstanceMetadataOptionsRequest{
 				HttpEndpoint:            options.MetadataOptions.HTTPEndpoint,
 				HttpProtocolIpv6:        options.MetadataOptions.HTTPProtocolIPv6,
@@ -311,6 +314,22 @@ func (p *DefaultProvider) generateNetworkInterfaces(options *amifamily.LaunchTem
 		}
 	}
 	return nil
+}
+
+func (p *DefaultProvider) generateCapacityReservationSpecification(options *amifamily.LaunchTemplate) *ec2.LaunchTemplateCapacityReservationSpecificationRequest {
+	if options == nil {
+		return nil
+	}
+
+	if options.CapacityReservation == nil {
+		return nil
+	}
+
+	return &ec2.LaunchTemplateCapacityReservationSpecificationRequest{
+		CapacityReservationTarget: &ec2.CapacityReservationTarget{
+			CapacityReservationId: &options.CapacityReservation.ID,
+		},
+	}
 }
 
 func (p *DefaultProvider) blockDeviceMappings(blockDeviceMappings []*v1beta1.BlockDeviceMapping) []*ec2.LaunchTemplateBlockDeviceMappingRequest {

@@ -34,6 +34,7 @@ import (
 
 	"github.com/aws/karpenter-provider-aws/pkg/apis/v1beta1"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/amifamily"
+	"github.com/aws/karpenter-provider-aws/pkg/providers/capacityreservation"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/instanceprofile"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/launchtemplate"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/securitygroup"
@@ -49,23 +50,25 @@ type nodeClassStatusReconciler interface {
 type Controller struct {
 	kubeClient client.Client
 
-	ami             *AMI
-	instanceprofile *InstanceProfile
-	subnet          *Subnet
-	securitygroup   *SecurityGroup
-	launchtemplate  *LaunchTemplate
+	ami                 *AMI
+	instanceprofile     *InstanceProfile
+	subnet              *Subnet
+	securitygroup       *SecurityGroup
+	capacityreservation *CapacityReservation
+	launchtemplate      *LaunchTemplate
 }
 
-func NewController(kubeClient client.Client, subnetProvider subnet.Provider, securityGroupProvider securitygroup.Provider,
+func NewController(kubeClient client.Client, subnetProvider subnet.Provider, securityGroupProvider securitygroup.Provider, capacityReservationProvider capacityreservation.Provider,
 	amiProvider amifamily.Provider, instanceProfileProvider instanceprofile.Provider, launchTemplateProvider launchtemplate.Provider) corecontroller.Controller {
 	return corecontroller.Typed[*v1beta1.EC2NodeClass](kubeClient, &Controller{
 		kubeClient: kubeClient,
 
-		ami:             &AMI{amiProvider: amiProvider},
-		subnet:          &Subnet{subnetProvider: subnetProvider},
-		securitygroup:   &SecurityGroup{securityGroupProvider: securityGroupProvider},
-		instanceprofile: &InstanceProfile{instanceProfileProvider: instanceProfileProvider},
-		launchtemplate:  &LaunchTemplate{launchTemplateProvider: launchTemplateProvider},
+		ami:                 &AMI{amiProvider: amiProvider},
+		subnet:              &Subnet{subnetProvider: subnetProvider},
+		securitygroup:       &SecurityGroup{securityGroupProvider: securityGroupProvider},
+		capacityreservation: &CapacityReservation{capacityReservationProvider: capacityReservationProvider},
+		instanceprofile:     &InstanceProfile{instanceProfileProvider: instanceProfileProvider},
+		launchtemplate:      &LaunchTemplate{launchTemplateProvider: launchTemplateProvider},
 	})
 }
 
@@ -87,6 +90,7 @@ func (c *Controller) Reconcile(ctx context.Context, nodeClass *v1beta1.EC2NodeCl
 		c.securitygroup,
 		c.instanceprofile,
 		c.launchtemplate,
+		c.capacityreservation,
 	} {
 		res, err := reconciler.Reconcile(ctx, nodeClass)
 		errs = multierr.Append(errs, err)

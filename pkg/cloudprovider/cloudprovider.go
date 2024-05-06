@@ -96,6 +96,9 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *corev1beta1.NodeC
 	}
 	instance, err := c.instanceProvider.Create(ctx, nodeClass, nodeClaim, instanceTypes)
 	if err != nil {
+		if cloudprovider.IsInsufficientCapacityError(err) {
+			return nil, cloudprovider.NewInsufficientCapacityError(fmt.Errorf("creating instance, %w", err))
+		}
 		return nil, fmt.Errorf("creating instance, %w", err)
 	}
 	instanceType, _ := lo.Find(instanceTypes, func(i *cloudprovider.InstanceType) bool {

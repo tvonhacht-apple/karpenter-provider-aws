@@ -24,6 +24,7 @@ import (
 	"github.com/imdario/mergo"
 	"github.com/samber/lo"
 	core "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	corev1beta1 "sigs.k8s.io/karpenter/pkg/apis/v1beta1"
@@ -56,6 +57,7 @@ type Options struct {
 	InstanceStorePolicy *v1beta1.InstanceStorePolicy
 	// Level-triggered fields that may change out of sync.
 	SecurityGroups           []v1beta1.SecurityGroup
+	CapacityReservations     []v1beta1.CapacityReservation
 	Tags                     map[string]string
 	Labels                   map[string]string `hash:"ignore"`
 	KubeDNSIP                net.IP
@@ -67,6 +69,7 @@ type Options struct {
 type LaunchTemplate struct {
 	*Options
 	UserData            bootstrap.Bootstrapper
+	CapacityReservation *v1beta1.CapacityReservation
 	BlockDeviceMappings []*v1beta1.BlockDeviceMapping
 	MetadataOptions     *v1beta1.MetadataOptions
 	AMIID               string
@@ -154,12 +157,63 @@ func (r Resolver) Resolve(ctx context.Context, nodeClass *v1beta1.EC2NodeClass, 
 				maxPods: int(instanceType.Capacity.Pods().Value()),
 			}
 		})
-		for params, instanceTypes := range paramsToInstanceTypes {
-			resolved, err := r.resolveLaunchTemplate(nodeClass, nodeClaim, instanceTypes, capacityType, amiFamily, amiID, params.maxPods, params.efaCount, options)
-			if err != nil {
-				return nil, err
+
+		zones := scheduling.NewNodeSelectorRequirementsWithMinValues(nodeClaim.Spec.Requirements...).Get(v1.LabelTopologyZone)
+		capacityReservations := []v1beta1.CapacityReservation{}
+		if capacityType == "capacity-reservation" {
+			for _, capacityReservation := range nodeClass.Status.CapacityReservations {
+				if capacityReservation.AvailableInstanceCount == 0 {
+					continue
+				}
+				if !zones.Has(capacityReservation.AvailabilityZone) {
+					continue
+				}
+				capacityReservations = append(capacityReservations, capacityReservation)
 			}
-			resolvedTemplates = append(resolvedTemplates, resolved)
+			if len(capacityReservations) == 0 {
+				return nil, cloudprovider.NewInsufficientCapacityError(fmt.Errorf("trying to resolve capacity-reservation but no available capacity reservations available"))
+			}
+		}
+
+		for params, instanceTypes := range paramsToInstanceTypes {
+
+			if len(capacityReservations) > 0 {
+				for _, capacityReservation := range capacityReservations {
+					resolved, err := r.resolveLaunchTemplate(
+						nodeClass,
+						nodeClaim,
+						&capacityReservation,
+						instanceTypes,
+						"on-demand", // capacity-type
+						amiFamily,
+						amiID,
+						params.maxPods,
+						params.efaCount,
+						options,
+					)
+					if err != nil {
+						return nil, err
+					}
+					resolvedTemplates = append(resolvedTemplates, resolved)
+				}
+			} else {
+				resolved, err := r.resolveLaunchTemplate(
+					nodeClass,
+					nodeClaim,
+					nil,
+					instanceTypes,
+					capacityType,
+					amiFamily,
+					amiID,
+					params.maxPods,
+					params.efaCount,
+					options,
+				)
+				if err != nil {
+					return nil, err
+				}
+				resolvedTemplates = append(resolvedTemplates, resolved)
+			}
 		}
 	}
 	return resolvedTemplates, nil
@@ -210,8 +264,18 @@ func (r Resolver) defaultClusterDNS(opts *Options, kubeletConfig *corev1beta1.Ku
 	return newKubeletConfig
 }
 
-func (r Resolver) resolveLaunchTemplate(nodeClass *v1beta1.EC2NodeClass, nodeClaim *corev1beta1.NodeClaim, instanceTypes []*cloudprovider.InstanceType, capacityType string,
-	amiFamily AMIFamily, amiID string, maxPods int, efaCount int, options *Options) (*LaunchTemplate, error) {
+func (r Resolver) resolveLaunchTemplate(
+	nodeClass *v1beta1.EC2NodeClass,
+	nodeClaim *corev1beta1.NodeClaim,
+	capacityReservation *v1beta1.CapacityReservation,
+	instanceTypes []*cloudprovider.InstanceType,
+	capacityType string,
+	amiFamily AMIFamily,
+	amiID string,
+	maxPods int,
+	efaCount int,
+	options *Options,
+) (*LaunchTemplate, error) {
 	kubeletConfig := &corev1beta1.KubeletConfiguration{}
 	if nodeClaim.Spec.Kubelet != nil {
 		if err := mergo.Merge(kubeletConfig, nodeClaim.Spec.Kubelet); err != nil {
@@ -232,6 +296,7 @@ func (r Resolver) resolveLaunchTemplate(nodeClass *v1beta1.EC2NodeClass, nodeCla
 			nodeClass.Spec.UserData,
 			options.InstanceStorePolicy,
 		),
+		CapacityReservation: capacityReservation,
 		BlockDeviceMappings: nodeClass.Spec.BlockDeviceMappings,
 		MetadataOptions:     nodeClass.Spec.MetadataOptions,
 		DetailedMonitoring:  aws.BoolValue(nodeClass.Spec.DetailedMonitoring),

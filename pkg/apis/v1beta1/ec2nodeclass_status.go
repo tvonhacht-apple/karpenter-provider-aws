@@ -38,6 +38,28 @@ type SecurityGroup struct {
 	Name string `json:"name,omitempty"`
 }
 
+// CapacityReservation contains resolved Capacity Reservation selector values utilized for node launch
+type CapacityReservation struct {
+	// ID of the Capacity Reservation
+	// +required
+	ID string `json:"id"`
+	// AvailabilityZone of the Capacity Reservation
+	// +required
+	AvailabilityZone string `json:"availabilityZone"`
+	// Available Instance Count of the Capacity Reservation
+	// +required
+	AvailableInstanceCount int `json:"availableInstanceCount"`
+	// InstanceType of the Capacity Reservation
+	// +required
+	InstanceType string `json:"instanceType"`
+	// Requirements of the Capacity Reservation to be utilized on an instance type
+	// +required
+	Requirements []corev1beta1.NodeSelectorRequirementWithMinValues `json:"requirements"`
+	// Total Instance Count of the Capacity Reservation
+	// +required
+	TotalInstanceCount int `json:"totalInstanceCount"`
+}
+
 // AMI contains resolved AMI selector values utilized for node launch
 type AMI struct {
 	// ID of the AMI
@@ -53,6 +75,10 @@ type AMI struct {
 
 // EC2NodeClassStatus contains the resolved state of the EC2NodeClass
 type EC2NodeClassStatus struct {
+	// CapacityReservations contains the current Capacity Reservations values that are available to the
+	// cluster under the CapacityReservations selectors.
+	// +optional
+	CapacityReservations []CapacityReservation `json:"capacityReservations,omitempty"`
 	// Subnets contains the current Subnet values that are available to the
 	// cluster under the subnet selectors.
 	// +optional

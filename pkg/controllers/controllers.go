@@ -24,6 +24,7 @@ import (
 	nodeclasstermination "github.com/aws/karpenter-provider-aws/pkg/controllers/nodeclass/termination"
 	controllersinstancetype "github.com/aws/karpenter-provider-aws/pkg/controllers/providers/instancetype"
 	controllerspricing "github.com/aws/karpenter-provider-aws/pkg/controllers/providers/pricing"
+	"github.com/aws/karpenter-provider-aws/pkg/providers/capacityreservation"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/launchtemplate"
 
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -52,12 +53,12 @@ import (
 
 func NewControllers(ctx context.Context, sess *session.Session, clk clock.Clock, kubeClient client.Client, recorder events.Recorder,
 	unavailableOfferings *cache.UnavailableOfferings, cloudProvider cloudprovider.CloudProvider, subnetProvider subnet.Provider,
-	securityGroupProvider securitygroup.Provider, instanceProfileProvider instanceprofile.Provider, instanceProvider instance.Provider,
+	securityGroupProvider securitygroup.Provider, capacityReservationProvider capacityreservation.Provider, instanceProfileProvider instanceprofile.Provider, instanceProvider instance.Provider,
 	pricingProvider pricing.Provider, amiProvider amifamily.Provider, launchTemplateProvider launchtemplate.Provider, instanceTypeProvider instancetype.Provider) []controller.Controller {
 
 	controllers := []controller.Controller{
 		nodeclasshash.NewController(kubeClient),
-		nodeclassstatus.NewController(kubeClient, subnetProvider, securityGroupProvider, amiProvider, instanceProfileProvider, launchTemplateProvider),
+		nodeclassstatus.NewController(kubeClient, subnetProvider, securityGroupProvider, capacityReservationProvider, amiProvider, instanceProfileProvider, launchTemplateProvider),
 		nodeclasstermination.NewController(kubeClient, recorder, instanceProfileProvider, launchTemplateProvider),
 		nodeclaimgarbagecollection.NewController(kubeClient, cloudProvider),
 		nodeclaimtagging.NewController(kubeClient, instanceProvider),

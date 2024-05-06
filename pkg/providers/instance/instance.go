@@ -96,17 +96,17 @@ func (p *DefaultProvider) Create(ctx context.Context, nodeClass *v1beta1.EC2Node
 		instanceTypes = p.filterInstanceTypes(nodeClaim, instanceTypes)
 	}
 	tags := getTags(ctx, nodeClass, nodeClaim)
-	fleetInstance, err := p.launchInstance(ctx, nodeClass, nodeClaim, instanceTypes, tags)
+	fleetInstance, capacityType, err := p.launchInstance(ctx, nodeClass, nodeClaim, instanceTypes, tags)
 	if awserrors.IsLaunchTemplateNotFound(err) {
 		// retry once if launch template is not found. This allows karpenter to generate a new LT if the
 		// cache was out-of-sync on the first try
-		fleetInstance, err = p.launchInstance(ctx, nodeClass, nodeClaim, instanceTypes, tags)
+		fleetInstance, capacityType, err = p.launchInstance(ctx, nodeClass, nodeClaim, instanceTypes, tags)
 	}
 	if err != nil {
 		return nil, err
 	}
 	efaEnabled := lo.Contains(lo.Keys(nodeClaim.Spec.Resources.Requests), v1beta1.ResourceEFA)
-	return NewInstanceFromFleet(fleetInstance, tags, efaEnabled), nil
+	return NewInstanceFromFleet(fleetInstance, tags, efaEnabled, capacityType), nil
 }
 
 func (p *DefaultProvider) Get(ctx context.Context, id string) (*Instance, error) {
@@ -193,17 +193,22 @@ func (p *DefaultProvider) CreateTags(ctx context.Context, id string, tags map[st
 	return nil
 }
 
-func (p *DefaultProvider) launchInstance(ctx context.Context, nodeClass *v1beta1.EC2NodeClass, nodeClaim *corev1beta1.NodeClaim, instanceTypes []*cloudprovider.InstanceType, tags map[string]string) (*ec2.CreateFleetInstance, error) {
+// workaround until capacity-reservation natively supported by EC2 API to return capacity type
+func (p *DefaultProvider) launchInstance(ctx context.Context, nodeClass *v1beta1.EC2NodeClass, nodeClaim *corev1beta1.NodeClaim, instanceTypes []*cloudprovider.InstanceType, tags map[string]string) (*ec2.CreateFleetInstance, string, error) {
 	capacityType := p.getCapacityType(nodeClaim, instanceTypes)
+
 	zonalSubnets, err := p.subnetProvider.ZonalSubnetsForLaunch(ctx, nodeClass, instanceTypes, capacityType)
 	if err != nil {
-		return nil, fmt.Errorf("getting subnets, %w", err)
+		return nil, "", fmt.Errorf("getting subnets, %w", err)
 	}
 
 	// Get Launch Template Configs, which may differ due to GPU or Architecture requirements
 	launchTemplateConfigs, err := p.getLaunchTemplateConfigs(ctx, nodeClass, nodeClaim, instanceTypes, zonalSubnets, capacityType, tags)
 	if err != nil {
-		return nil, fmt.Errorf("getting launch template configs, %w", err)
+		if cloudprovider.IsInsufficientCapacityError(err) {
+			return nil, "", cloudprovider.NewInsufficientCapacityError(fmt.Errorf("getting launch template configs, %w", err))
+		}
+		return nil, "", fmt.Errorf("getting launch template configs, %w", err)
 	}
 	if err := p.checkODFallback(nodeClaim, instanceTypes, launchTemplateConfigs); err != nil {
 		logging.FromContext(ctx).Warn(err.Error())
@@ -214,7 +219,8 @@ func (p *DefaultProvider) launchInstance(ctx context.Context, nodeClass *v1beta1
 		Context:               nodeClass.Spec.Context,
 		LaunchTemplateConfigs: launchTemplateConfigs,
 		TargetCapacitySpecification: &ec2.TargetCapacitySpecificationRequest{
-			DefaultTargetCapacityType: aws.String(capacityType),
+			// workaround until capacity-reservation natively supported by EC2 API
+			DefaultTargetCapacityType: lo.Ternary(capacityType == "capacity-reservation", aws.String("on-demand"), aws.String(capacityType)),
 			TotalTargetCapacity:       aws.Int64(1),
 		},
 		TagSpecifications: []*ec2.TagSpecification{
@@ -226,6 +232,7 @@ func (p *DefaultProvider) launchInstance(ctx context.Context, nodeClass *v1beta1
 	if capacityType == corev1beta1.CapacityTypeSpot {
 		createFleetInput.SpotOptions = &ec2.SpotOptionsRequest{AllocationStrategy: aws.String(ec2.SpotAllocationStrategyPriceCapacityOptimized)}
 	} else {
+		// will handle capacity-reservation and on-demand
 		createFleetInput.OnDemandOptions = &ec2.OnDemandOptionsRequest{AllocationStrategy: aws.String(ec2.FleetOnDemandAllocationStrategyLowestPrice)}
 	}
 
@@ -236,19 +243,19 @@ func (p *DefaultProvider) launchInstance(ctx context.Context, nodeClass *v1beta1
 			for _, lt := range launchTemplateConfigs {
 				p.launchTemplateProvider.InvalidateCache(ctx, aws.StringValue(lt.LaunchTemplateSpecification.LaunchTemplateName), aws.StringValue(lt.LaunchTemplateSpecification.LaunchTemplateId))
 			}
-			return nil, fmt.Errorf("creating fleet %w", err)
+			return nil, "", fmt.Errorf("creating fleet %w", err)
 		}
 		var reqFailure awserr.RequestFailure
 		if errors.As(err, &reqFailure) {
-			return nil, fmt.Errorf("creating fleet %w (%s)", err, reqFailure.RequestID())
+			return nil, "", fmt.Errorf("creating fleet %w (%s)", err, reqFailure.RequestID())
 		}
-		return nil, fmt.Errorf("creating fleet %w", err)
+		return nil, "", fmt.Errorf("creating fleet %w", err)
 	}
 	p.updateUnavailableOfferingsCache(ctx, createFleetOutput.Errors, capacityType)
 	if len(createFleetOutput.Instances) == 0 || len(createFleetOutput.Instances[0].InstanceIds) == 0 {
-		return nil, combineFleetErrors(createFleetOutput.Errors)
+		return nil, "", combineFleetErrors(createFleetOutput.Errors)
 	}
-	return createFleetOutput.Instances[0], nil
+	return createFleetOutput.Instances[0], capacityType, nil
 }
 
 func getTags(ctx context.Context, nodeClass *v1beta1.EC2NodeClass, nodeClaim *corev1beta1.NodeClaim) map[string]string {
@@ -289,6 +296,9 @@ func (p *DefaultProvider) getLaunchTemplateConfigs(ctx context.Context, nodeClas
 	var launchTemplateConfigs []*ec2.FleetLaunchTemplateConfigRequest
 	launchTemplates, err := p.launchTemplateProvider.EnsureAll(ctx, nodeClass, nodeClaim, instanceTypes, capacityType, tags)
 	if err != nil {
+		if cloudprovider.IsInsufficientCapacityError(err) {
+			return nil, cloudprovider.NewInsufficientCapacityError(fmt.Errorf("getting launch templates, %w", err))
+		}
 		return nil, fmt.Errorf("getting launch templates, %w", err)
 	}
 	for _, launchTemplate := range launchTemplates {
@@ -361,12 +371,20 @@ func (p *DefaultProvider) updateUnavailableOfferingsCache(ctx context.Context, e
 	}
 }
 
-// getCapacityType selects spot if both constraints are flexible and there is an
-// available offering. The AWS Cloud Provider defaults to [ on-demand ], so spot
+// getCapacityType selects capacity-reservation or spot if both constraints are flexible and there is an
+// available offering. The AWS Cloud Provider defaults to [ on-demand ], so capacity-reservation or spot
 // must be explicitly included in capacity type requirements.
 func (p *DefaultProvider) getCapacityType(nodeClaim *corev1beta1.NodeClaim, instanceTypes []*cloudprovider.InstanceType) string {
-	requirements := scheduling.NewNodeSelectorRequirementsWithMinValues(nodeClaim.
-		Spec.Requirements...)
+	requirements := scheduling.NewNodeSelectorRequirementsWithMinValues(nodeClaim.Spec.Requirements...)
+	if requirements.Get(corev1beta1.CapacityTypeLabelKey).Has("capacity-reservation") {
+		for _, instanceType := range instanceTypes {
+			for _, offering := range instanceType.Offerings.Available() {
+				if requirements.Get(v1.LabelTopologyZone).Has(offering.Zone) && offering.CapacityType == "capacity-reservation" {
+					return "capacity-reservation"
+				}
+			}
+		}
+	}
 	if requirements.Get(corev1beta1.CapacityTypeLabelKey).Has(corev1beta1.CapacityTypeSpot) {
 		for _, instanceType := range instanceTypes {
 			for _, offering := range instanceType.Offerings.Available() {

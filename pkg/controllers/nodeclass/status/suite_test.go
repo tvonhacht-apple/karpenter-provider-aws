@@ -59,6 +59,7 @@ var _ = BeforeSuite(func() {
 		env.Client,
 		awsEnv.SubnetProvider,
 		awsEnv.SecurityGroupProvider,
+		awsEnv.CapacityReservationProvider,
 		awsEnv.AMIProvider,
 		awsEnv.InstanceProfileProvider,
 		awsEnv.LaunchTemplateProvider,

@@ -164,10 +164,28 @@ func (p *DefaultProvider) List(ctx context.Context, kc *corev1beta1.KubeletConfi
 		// Any changes to the values passed into the NewInstanceType method will require making updates to the cache key
 		// so that Karpenter is able to cache the set of InstanceTypes based on values that alter the set of instance types
 		// !!! Important !!!
-		return NewInstanceType(ctx, i, p.region,
-			nodeClass.Spec.BlockDeviceMappings, nodeClass.Spec.InstanceStorePolicy,
-			kc.MaxPods, kc.PodsPerCore, kc.KubeReserved, kc.SystemReserved, kc.EvictionHard, kc.EvictionSoft,
-			amiFamily, p.createOfferings(ctx, i, p.instanceTypeOfferings[aws.StringValue(i.InstanceType)], allZones, subnetZones))
+		return NewInstanceType(
+			ctx,
+			i,
+			p.region,
+			nodeClass.Spec.BlockDeviceMappings,
+			nodeClass.Spec.InstanceStorePolicy,
+			kc.MaxPods,
+			kc.PodsPerCore,
+			kc.KubeReserved,
+			kc.SystemReserved,
+			kc.EvictionHard,
+			kc.EvictionSoft,
+			amiFamily,
+			p.createOfferings(
+				ctx,
+				i,
+				p.instanceTypeOfferings[aws.StringValue(i.InstanceType)],
+				allZones,
+				subnetZones,
+				nodeClass.Status.CapacityReservations,
+			),
+		)
 	})
 	p.instanceTypesCache.SetDefault(key, result)
 	return result, nil
@@ -251,11 +269,22 @@ func (p *DefaultProvider) UpdateInstanceTypeOfferings(ctx context.Context) error
 	return nil
 }
 
-func (p *DefaultProvider) createOfferings(ctx context.Context, instanceType *ec2.InstanceTypeInfo, instanceTypeZones, zones, subnetZones sets.Set[string]) []cloudprovider.Offering {
+func (p *DefaultProvider) createOfferings(
+	ctx context.Context,
+	instanceType *ec2.InstanceTypeInfo,
+	instanceTypeZones,
+	zones,
+	subnetZones sets.Set[string],
+	capacityReservations []v1beta1.CapacityReservation,
+) []cloudprovider.Offering {
 	var offerings []cloudprovider.Offering
+
+	// workaround until ec2 supports "capacity-reservation" as a supported class natively
+	supportedUsageClasses := sets.NewString(append(aws.StringValueSlice(instanceType.SupportedUsageClasses), "capacity-reservation")...)
+
 	for zone := range zones {
 		// while usage classes should be a distinct set, there's no guarantee of that
-		for capacityType := range sets.NewString(aws.StringValueSlice(instanceType.SupportedUsageClasses)...) {
+		for capacityType := range supportedUsageClasses {
 			// exclude any offerings that have recently seen an insufficient capacity error from EC2
 			isUnavailable := p.unavailableOfferings.IsUnavailable(*instanceType.InstanceType, zone, capacityType)
 			var price float64
@@ -265,6 +294,14 @@ func (p *DefaultProvider) createOfferings(ctx context.Context, instanceType *ec2
 				price, ok = p.pricingProvider.SpotPrice(*instanceType.InstanceType, zone)
 			case ec2.UsageClassTypeOnDemand:
 				price, ok = p.pricingProvider.OnDemandPrice(*instanceType.InstanceType)
+			case "capacity-reservation":
+				// logging.FromContext(ctx).Debugf("Creating offering for capacity reservation instance type %s and zone %s", *instanceType.InstanceType, zone)
+				price = 0.0
+				ok = hasCapacityReservation(
+					capacityReservations,
+					instanceType,
+					zone,
+				)
 			case "capacity-block":
 				// ignore since karpenter doesn't support it yet, but do not log an unknown capacity type error
 				continue
@@ -279,6 +316,7 @@ func (p *DefaultProvider) createOfferings(ctx context.Context, instanceType *ec2
 				Price:        price,
 				Available:    available,
 			})
+			// TODO: Do we want to set this for capacityType capacity-reservation?
 			instanceTypeOfferingAvailable.With(prometheus.Labels{
 				instanceTypeLabel: *instanceType.InstanceType,
 				capacityTypeLabel: capacityType,
@@ -292,6 +330,29 @@ func (p *DefaultProvider) createOfferings(ctx context.Context, instanceType *ec2
 		}
 	}
 	return offerings
+}
+
+func hasCapacityReservation(
+	capacityReservations []v1beta1.CapacityReservation,
+	instanceType *ec2.InstanceTypeInfo,
+	zone string,
+) bool {
+	for _, capacityReservation := range capacityReservations {
+		if capacityReservation.AvailableInstanceCount == 0 {
+			continue
+		}
+
+		if capacityReservation.AvailabilityZone != zone {
+			continue
+		}
+
+		if capacityReservation.InstanceType != aws.StringValue(instanceType.InstanceType) {
+			continue
+		}
+
+		return true
+	}
+	return false
 }
 
 func (p *DefaultProvider) Reset() {

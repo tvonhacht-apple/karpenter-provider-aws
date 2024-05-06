@@ -55,6 +55,9 @@ type EC2NodeClassSpec struct {
 	// +kubebuilder:validation:Enum:={AL2,AL2023,Bottlerocket,Ubuntu,Custom,Windows2019,Windows2022}
 	// +required
 	AMIFamily *string `json:"amiFamily"`
+	// CapacityReservationSelectorTerms is a list of or Capacity Reservation selector terms. The terms are ORed.
+	// +required
+	CapacityReservationSelectorTerms []CapacityReservationSelectorTerm `json:"capacityReservationSelectorTerms,omitempty" hash:"ignore"`
 	// UserData to be applied to the provisioned nodes.
 	// It must be in the appropriate format based on the AMIFamily in use. Karpenter will merge certain fields into
 	// this UserData to ensure nodes are being provisioned with the correct configuration.
@@ -173,6 +176,52 @@ type AMISelectorTerm struct {
 	// You can specify a combination of AWS account IDs, "self", "amazon", and "aws-marketplace"
 	// +optional
 	Owner string `json:"owner,omitempty"`
+}
+
+// CapacityReservationSelectorTerm defines selection logic for a Capacity Reservation used by Karpenter to launch nodes.
+// If multiple fields are used for selection, the requirements are ANDed.
+type CapacityReservationSelectorTerm struct {
+	// The Availability Zone of the Capacity Reservation
+	// +optional
+	AvailabilityZone string `json:"availabilityZone,omitempty"`
+	// The platform of operating system for which the Capacity Reservation reserves capacity
+	// +optional
+	ID string `json:"id,omitempty"`
+	// Tags is a map of key/value tags used to select subnets
+	// Specifying '*' for a value selects all values for a given tag key.
+	// +kubebuilder:validation:XValidation:message="empty tag keys or values aren't supported",rule="self.all(k, k != '' && self[k] != '')"
+	// +kubebuilder:validation:MaxProperties:=20
+	// +optional
+	Tags map[string]string `json:"tags,omitempty"`
+	// ID is the Capacity Reservation id in EC2
+	// +kubebuilder:validation:Pattern:="cr-[0-9a-z]+"
+	// +optional
+	Tenancy string `json:"tenancy,omitempty"`
+	// Indicates the type of instance launches that the Capacity Reservation accepts. The options include 'open' and 'targeted'.
+	// open - The Capacity Reservation accepts all instances that have
+	// matching attributes (instance type, platform, and Availability
+	// Zone). Instances that have matching attributes launch into the
+	// Capacity Reservation automatically without specifying any
+	// additional parameters.
+	// targeted - The Capacity Reservation only accepts instances that
+	// have matching attributes (instance type, platform, and
+	// Availability Zone), and explicitly target the Capacity
+	// Reservation. This ensures that only permitted instances can use
+	// the reserved capacity.
+	// +optional
+	InstanceMatchCriteria string `json:"instanceMatchCriteria,omitempty"`
+	// Indicates the tenancy of the Capacity Reservation.
+	// A Capacity Reservation can have one of the following tenancy 'default' or 'dedicated'
+	// default - The Capacity Reservation is created on hardware that is shared with other Amazon Web Services accounts.
+	// dedicated - The Capacity Reservation is created on single-tenant hardware that is dedicated to a single Amazon Web Services account.
+	// +optional
+	InstancePlatform string `json:"instancePlatform,omitempty"`
+	// The type of operating system for which the Capacity Reservation reserves capacity
+	// +optional
+	InstanceType string `json:"instanceType,omitempty"`
+	// The ID of the Amazon Web Services account that owns the Capacity Reservation
+	// +optional
+	OwnerId string `json:"ownerId,omitempty"`
 }
 
 // MetadataOptions contains parameters for specifying the exposure of the

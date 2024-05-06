@@ -30,6 +30,7 @@ import (
 	awscache "github.com/aws/karpenter-provider-aws/pkg/cache"
 	"github.com/aws/karpenter-provider-aws/pkg/fake"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/amifamily"
+	"github.com/aws/karpenter-provider-aws/pkg/providers/capacityreservation"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/instance"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/instanceprofile"
 	"github.com/aws/karpenter-provider-aws/pkg/providers/instancetype"
@@ -67,19 +68,21 @@ type Environment struct {
 	AvailableIPAdressCache        *cache.Cache
 	AssociatePublicIPAddressCache *cache.Cache
 	SecurityGroupCache            *cache.Cache
+	CapacityReservationCache      *cache.Cache
 	InstanceProfileCache          *cache.Cache
 
 	// Providers
-	InstanceTypesProvider   *instancetype.DefaultProvider
-	InstanceProvider        *instance.DefaultProvider
-	SubnetProvider          *subnet.DefaultProvider
-	SecurityGroupProvider   *securitygroup.DefaultProvider
-	InstanceProfileProvider *instanceprofile.DefaultProvider
-	PricingProvider         *pricing.DefaultProvider
-	AMIProvider             *amifamily.DefaultProvider
-	AMIResolver             *amifamily.Resolver
-	VersionProvider         *version.DefaultProvider
-	LaunchTemplateProvider  *launchtemplate.DefaultProvider
+	InstanceTypesProvider       *instancetype.DefaultProvider
+	InstanceProvider            *instance.DefaultProvider
+	SubnetProvider              *subnet.DefaultProvider
+	SecurityGroupProvider       *securitygroup.DefaultProvider
+	CapacityReservationProvider *capacityreservation.DefaultProvider
+	InstanceProfileProvider     *instanceprofile.DefaultProvider
+	PricingProvider             *pricing.DefaultProvider
+	AMIProvider                 *amifamily.DefaultProvider
+	AMIResolver                 *amifamily.Resolver
+	VersionProvider             *version.DefaultProvider
+	LaunchTemplateProvider      *launchtemplate.DefaultProvider
 }
 
 func NewEnvironment(ctx context.Context, env *coretest.Environment) *Environment {
@@ -99,6 +102,7 @@ func NewEnvironment(ctx context.Context, env *coretest.Environment) *Environment
 	availableIPAdressCache := cache.New(awscache.AvailableIPAddressTTL, awscache.DefaultCleanupInterval)
 	associatePublicIPAddressCache := cache.New(awscache.AssociatePublicIPAddressTTL, awscache.DefaultCleanupInterval)
 	securityGroupCache := cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval)
+	capacityReservationCache := cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval)
 	instanceProfileCache := cache.New(awscache.DefaultTTL, awscache.DefaultCleanupInterval)
 	fakePricingAPI := &fake.PricingAPI{}
 
@@ -106,6 +110,7 @@ func NewEnvironment(ctx context.Context, env *coretest.Environment) *Environment
 	pricingProvider := pricing.NewDefaultProvider(ctx, fakePricingAPI, ec2api, fake.DefaultRegion)
 	subnetProvider := subnet.NewDefaultProvider(ec2api, subnetCache, availableIPAdressCache, associatePublicIPAddressCache)
 	securityGroupProvider := securitygroup.NewDefaultProvider(ec2api, securityGroupCache)
+	capacityReservationProvider := capacityreservation.NewDefaultProvider(ec2api, capacityReservationCache)
 	versionProvider := version.NewDefaultProvider(env.KubernetesInterface, kubernetesVersionCache)
 	instanceProfileProvider := instanceprofile.NewDefaultProvider(fake.DefaultRegion, iamapi, instanceProfileCache)
 	amiProvider := amifamily.NewDefaultProvider(versionProvider, ssmapi, ec2api, ec2Cache)
@@ -149,19 +154,21 @@ func NewEnvironment(ctx context.Context, env *coretest.Environment) *Environment
 		AvailableIPAdressCache:        availableIPAdressCache,
 		AssociatePublicIPAddressCache: associatePublicIPAddressCache,
 		SecurityGroupCache:            securityGroupCache,
+		CapacityReservationCache:      capacityReservationCache,
 		InstanceProfileCache:          instanceProfileCache,
 		UnavailableOfferingsCache:     unavailableOfferingsCache,
 
-		InstanceTypesProvider:   instanceTypesProvider,
-		InstanceProvider:        instanceProvider,
-		SubnetProvider:          subnetProvider,
-		SecurityGroupProvider:   securityGroupProvider,
-		LaunchTemplateProvider:  launchTemplateProvider,
-		InstanceProfileProvider: instanceProfileProvider,
-		PricingProvider:         pricingProvider,
-		AMIProvider:             amiProvider,
-		AMIResolver:             amiResolver,
-		VersionProvider:         versionProvider,
+		InstanceTypesProvider:       instanceTypesProvider,
+		InstanceProvider:            instanceProvider,
+		SubnetProvider:              subnetProvider,
+		SecurityGroupProvider:       securityGroupProvider,
+		CapacityReservationProvider: capacityReservationProvider,
+		LaunchTemplateProvider:      launchTemplateProvider,
+		InstanceProfileProvider:     instanceProfileProvider,
+		PricingProvider:             pricingProvider,
+		AMIProvider:                 amiProvider,
+		AMIResolver:                 amiResolver,
+		VersionProvider:             versionProvider,
 	}
 }
 

@@ -61,7 +61,8 @@ func NewInstance(out *ec2.Instance) *Instance {
 
 }
 
-func NewInstanceFromFleet(out *ec2.CreateFleetInstance, tags map[string]string, efaEnabled bool) *Instance {
+// workaround until capacity-reservation natively supported by EC2 API to return capacity type in out.Lifecycle
+func NewInstanceFromFleet(out *ec2.CreateFleetInstance, tags map[string]string, efaEnabled bool, capacityType string) *Instance {
 	return &Instance{
 		LaunchTime:   time.Now(), // estimate the launch time since we just launched
 		State:        ec2.StatePending,
@@ -69,7 +70,7 @@ func NewInstanceFromFleet(out *ec2.CreateFleetInstance, tags map[string]string, 
 		ImageID:      aws.StringValue(out.LaunchTemplateAndOverrides.Overrides.ImageId),
 		Type:         aws.StringValue(out.InstanceType),
 		Zone:         aws.StringValue(out.LaunchTemplateAndOverrides.Overrides.AvailabilityZone),
-		CapacityType: aws.StringValue(out.Lifecycle),
+		CapacityType: capacityType,
 		SubnetID:     aws.StringValue(out.LaunchTemplateAndOverrides.Overrides.SubnetId),
 		Tags:         tags,
 		EFAEnabled:   efaEnabled,
