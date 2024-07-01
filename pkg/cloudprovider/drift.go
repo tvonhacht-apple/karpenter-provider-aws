@@ -32,10 +32,11 @@ import (
 )
 
 const (
-	AMIDrift           cloudprovider.DriftReason = "AMIDrift"
-	SubnetDrift        cloudprovider.DriftReason = "SubnetDrift"
-	SecurityGroupDrift cloudprovider.DriftReason = "SecurityGroupDrift"
-	NodeClassDrift     cloudprovider.DriftReason = "NodeClassDrift"
+	AMIDrift                 cloudprovider.DriftReason = "AMIDrift"
+	SubnetDrift              cloudprovider.DriftReason = "SubnetDrift"
+	SecurityGroupDrift       cloudprovider.DriftReason = "SecurityGroupDrift"
+	NodeClassDrift           cloudprovider.DriftReason = "NodeClassDrift"
+	CapacityReservationDrift cloudprovider.DriftReason = "CapacityReservationDrift"
 )
 
 func (c *CloudProvider) isNodeClassDrifted(ctx context.Context, nodeClaim *corev1beta1.NodeClaim, nodePool *corev1beta1.NodePool, nodeClass *v1beta1.EC2NodeClass) (cloudprovider.DriftReason, error) {
@@ -59,7 +60,11 @@ func (c *CloudProvider) isNodeClassDrifted(ctx context.Context, nodeClaim *corev
 	if err != nil {
 		return "", fmt.Errorf("calculating subnet drift, %w", err)
 	}
-	drifted := lo.FindOrElse([]cloudprovider.DriftReason{amiDrifted, securitygroupDrifted, subnetDrifted}, "", func(i cloudprovider.DriftReason) bool {
+	capacityReservationDrifted, err := c.isCapacityReservationDrifted(nodeClaim, instance)
+	if err != nil {
+		return "", fmt.Errorf("calculating capacityreservation drift, %w", err)
+	}
+	drifted := lo.FindOrElse([]cloudprovider.DriftReason{amiDrifted, securitygroupDrifted, subnetDrifted, capacityReservationDrifted}, "", func(i cloudprovider.DriftReason) bool {
 		return string(i) != ""
 	})
 	return drifted, nil
@@ -102,6 +107,23 @@ func (c *CloudProvider) isSubnetDrifted(instance *instance.Instance, nodeClass *
 	if !found {
 		return SubnetDrift, nil
 	}
+	return "", nil
+}
+
+// Checks if the security groups are drifted, by comparing the subnet returned from the subnetProvider
+// to the ec2 instance subnets
+func (c *CloudProvider) isCapacityReservationDrifted(nodeClaim *corev1beta1.NodeClaim, instance *instance.Instance) (cloudprovider.DriftReason, error) {
+	nodeClaimCapacityReservationId := nodeClaim.Labels[v1beta1.LabelCapactiyReservationID]
+	instanceCapacityReservationID := ""
+	if instance.CapacityReservationID != nil {
+		instanceCapacityReservationID = *instance.CapacityReservationID
+	}
+
+	// if they match, everything is good
+	if nodeClaimCapacityReservationId != instanceCapacityReservationID {
+		return CapacityReservationDrift, nil
+	}
+
 	return "", nil
 }
 

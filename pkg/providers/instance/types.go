@@ -27,28 +27,30 @@ import (
 // Instance is an internal data representation of either an ec2.Instance or an ec2.FleetInstance
 // It contains all the common data that is needed to inject into the Machine from either of these responses
 type Instance struct {
-	LaunchTime       time.Time
-	State            string
-	ID               string
-	ImageID          string
-	Type             string
-	Zone             string
-	CapacityType     string
-	SecurityGroupIDs []string
-	SubnetID         string
-	Tags             map[string]string
-	EFAEnabled       bool
+	LaunchTime            time.Time
+	State                 string
+	ID                    string
+	ImageID               string
+	Type                  string
+	Zone                  string
+	CapacityType          string
+	CapacityReservationID *string
+	SecurityGroupIDs      []string
+	SubnetID              string
+	Tags                  map[string]string
+	EFAEnabled            bool
 }
 
 func NewInstance(out *ec2.Instance) *Instance {
 	return &Instance{
-		LaunchTime:   aws.TimeValue(out.LaunchTime),
-		State:        aws.StringValue(out.State.Name),
-		ID:           aws.StringValue(out.InstanceId),
-		ImageID:      aws.StringValue(out.ImageId),
-		Type:         aws.StringValue(out.InstanceType),
-		Zone:         aws.StringValue(out.Placement.AvailabilityZone),
-		CapacityType: lo.Ternary(out.SpotInstanceRequestId != nil, corev1beta1.CapacityTypeSpot, corev1beta1.CapacityTypeOnDemand),
+		LaunchTime:            aws.TimeValue(out.LaunchTime),
+		State:                 aws.StringValue(out.State.Name),
+		ID:                    aws.StringValue(out.InstanceId),
+		ImageID:               aws.StringValue(out.ImageId),
+		Type:                  aws.StringValue(out.InstanceType),
+		Zone:                  aws.StringValue(out.Placement.AvailabilityZone),
+		CapacityType:          lo.Ternary(out.SpotInstanceRequestId != nil, corev1beta1.CapacityTypeSpot, corev1beta1.CapacityTypeOnDemand),
+		CapacityReservationID: out.CapacityReservationId,
 		SecurityGroupIDs: lo.Map(out.SecurityGroups, func(securitygroup *ec2.GroupIdentifier, _ int) string {
 			return aws.StringValue(securitygroup.GroupId)
 		}),

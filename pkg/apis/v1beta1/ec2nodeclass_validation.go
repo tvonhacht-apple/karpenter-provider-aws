@@ -81,6 +81,8 @@ func (in *EC2NodeClassSpec) validate(_ context.Context) (errs *apis.FieldError) 
 		in.validateAMIFamily().ViaField(amiFamilyPath),
 		in.validateBlockDeviceMappings().ViaField(blockDeviceMappingsPath),
 		in.validateTags().ViaField(tagsPath),
+		// TODO: tvonhacht
+		// in.validateCapacityReservationTerms().ViaField(capacityReservationTermsPath),
 	)
 }
 

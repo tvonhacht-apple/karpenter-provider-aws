@@ -96,7 +96,7 @@ func (p *DefaultProvider) Create(ctx context.Context, nodeClass *v1beta1.EC2Node
 	schedulingRequirements := scheduling.NewNodeSelectorRequirementsWithMinValues(nodeClaim.Spec.Requirements...)
 	// Only filter the instances if there are no minValues in the requirement.
 	if !schedulingRequirements.HasMinValues() {
-		instanceTypes = p.filterInstanceTypes(nodeClaim, instanceTypes)
+		instanceTypes = p.filterInstanceTypes(ctx, nodeClaim, instanceTypes)
 	}
 	instanceTypes, err := cloudprovider.InstanceTypes(instanceTypes).Truncate(schedulingRequirements, maxInstanceTypes)
 	if err != nil {
@@ -236,6 +236,7 @@ func (p *DefaultProvider) launchInstance(ctx context.Context, nodeClass *v1beta1
 		createFleetInput.OnDemandOptions = &ec2.OnDemandOptionsRequest{AllocationStrategy: aws.String(ec2.FleetOnDemandAllocationStrategyLowestPrice)}
 	}
 
+	log.FromContext(ctx).WithValues("createFleetInput", createFleetInput).V(0).Info("CreateFleet")
 	createFleetOutput, err := p.ec2Batcher.CreateFleet(ctx, createFleetInput)
 	p.subnetProvider.UpdateInflightIPs(createFleetInput, createFleetOutput, instanceTypes, lo.Values(zonalSubnets), capacityType)
 	if err != nil {
@@ -298,11 +299,14 @@ func (p *DefaultProvider) getLaunchTemplateConfigs(ctx context.Context, nodeClas
 	if err != nil {
 		return nil, fmt.Errorf("getting launch templates, %w", err)
 	}
-	requirements := scheduling.NewNodeSelectorRequirementsWithMinValues(nodeClaim.Spec.Requirements...)
-	requirements[corev1beta1.CapacityTypeLabelKey] = scheduling.NewRequirement(corev1beta1.CapacityTypeLabelKey, v1.NodeSelectorOpIn, capacityType)
 	for _, launchTemplate := range launchTemplates {
+		requirements := scheduling.NewNodeSelectorRequirementsWithMinValues(nodeClaim.Spec.Requirements...)
+		requirements[corev1beta1.CapacityTypeLabelKey] = scheduling.NewRequirement(corev1beta1.CapacityTypeLabelKey, v1.NodeSelectorOpIn, capacityType)
+		if launchTemplate.CapacityReservationID != nil {
+			requirements[v1beta1.LabelCapactiyReservationID] = scheduling.NewRequirement(v1beta1.LabelCapactiyReservationID, v1.NodeSelectorOpIn, *launchTemplate.CapacityReservationID)
+		}
 		launchTemplateConfig := &ec2.FleetLaunchTemplateConfigRequest{
-			Overrides: p.getOverrides(launchTemplate.InstanceTypes, zonalSubnets, requirements, launchTemplate.ImageID),
+			Overrides: p.getOverrides(ctx, launchTemplate.InstanceTypes, zonalSubnets, requirements, launchTemplate.ImageID),
 			LaunchTemplateSpecification: &ec2.FleetLaunchTemplateSpecificationRequest{
 				LaunchTemplateName: aws.String(launchTemplate.Name),
 				Version:            aws.String("$Latest"),
@@ -312,6 +316,8 @@ func (p *DefaultProvider) getLaunchTemplateConfigs(ctx context.Context, nodeClas
 			launchTemplateConfigs = append(launchTemplateConfigs, launchTemplateConfig)
 		}
 	}
+
+	log.FromContext(ctx).WithValues("launchTemplateConfigs", launchTemplateConfigs).V(0).Info("getLaunchTemplateConfigs")
 	if len(launchTemplateConfigs) == 0 {
 		return nil, fmt.Errorf("no capacity offerings are currently available given the constraints")
 	}
@@ -320,7 +326,7 @@ func (p *DefaultProvider) getLaunchTemplateConfigs(ctx context.Context, nodeClas
 
 // getOverrides creates and returns launch template overrides for the cross product of InstanceTypes and subnets (with subnets being constrained by
 // zones and the offerings in InstanceTypes)
-func (p *DefaultProvider) getOverrides(instanceTypes []*cloudprovider.InstanceType, zonalSubnets map[string]*subnet.Subnet, reqs scheduling.Requirements, image string) []*ec2.FleetLaunchTemplateOverridesRequest {
+func (p *DefaultProvider) getOverrides(ctx context.Context, instanceTypes []*cloudprovider.InstanceType, zonalSubnets map[string]*subnet.Subnet, reqs scheduling.Requirements, image string) []*ec2.FleetLaunchTemplateOverridesRequest {
 	// Unwrap all the offerings to a flat slice that includes a pointer
 	// to the parent instance type name
 	type offeringWithParentName struct {
@@ -339,9 +345,12 @@ func (p *DefaultProvider) getOverrides(instanceTypes []*cloudprovider.InstanceTy
 	}
 	var overrides []*ec2.FleetLaunchTemplateOverridesRequest
 	for _, offering := range unwrappedOfferings {
+		log.FromContext(ctx).WithValues("offering.Requirements", offering.Requirements).V(0).Info("getOverrides")
 		if reqs.Compatible(offering.Requirements, scheduling.AllowUndefinedWellKnownLabels) != nil {
+			log.FromContext(ctx).WithValues("offering.Requirements", offering.Requirements, "reqs", reqs).V(0).Info("getOverrides not compatible")
 			continue
 		}
+		log.FromContext(ctx).WithValues("unwrappedOffering", offering, "zones", offering.Requirements.Get(v1.LabelTopologyZone).Values()).V(0).Info("getOverrides compatible")
 		subnet, ok := zonalSubnets[offering.Requirements.Get(v1.LabelTopologyZone).Any()]
 		if !ok {
 			continue
@@ -386,13 +395,21 @@ func (p *DefaultProvider) getCapacityType(nodeClaim *corev1beta1.NodeClaim, inst
 
 // filterInstanceTypes is used to provide filtering on the list of potential instance types to further limit it to those
 // that make the most sense given our specific AWS cloudprovider.
-func (p *DefaultProvider) filterInstanceTypes(nodeClaim *corev1beta1.NodeClaim, instanceTypes []*cloudprovider.InstanceType) []*cloudprovider.InstanceType {
+func (p *DefaultProvider) filterInstanceTypes(ctx context.Context, nodeClaim *corev1beta1.NodeClaim, instanceTypes []*cloudprovider.InstanceType) []*cloudprovider.InstanceType {
 	instanceTypes = filterExoticInstanceTypes(instanceTypes)
 	// If we could potentially launch either a spot or on-demand node, we want to filter out the spot instance types that
 	// are more expensive than the cheapest on-demand type.
 	if p.isMixedCapacityLaunch(nodeClaim, instanceTypes) {
 		instanceTypes = filterUnwantedSpot(instanceTypes)
 	}
+	// If we could potentially launch either a spot or on-demand node, we want to filter out the spot instance types that
+	// are more expensive than the cheapest on-demand type.
+	log.FromContext(ctx).WithValues("instanceTypes", instanceTypes, "scheduling.allowUndefinedWellKnownLabels", scheduling.AllowUndefinedWellKnownLabels).V(0).Info("filterInstanceTypes capacity reservations")
+	if p.isCapacityReservationLaunch(nodeClaim, instanceTypes) {
+		log.FromContext(ctx).V(0).Info("filterInstanceTypes capacity reservations only capacity reservations")
+		instanceTypes = filterOnlyCapacityReservations(instanceTypes)
+	}
+	log.FromContext(ctx).WithValues("instanceTypes", instanceTypes).V(0).Info("filterInstanceTypes capacity reservations after")
 	return instanceTypes
 }
 
@@ -424,6 +441,30 @@ func (p *DefaultProvider) isMixedCapacityLaunch(nodeClaim *corev1beta1.NodeClaim
 	return hasSpotOfferings && hasODOffering
 }
 
+// isMixedCapacityLaunch returns true if nodepools and available offerings could potentially allow either a spot or
+// and on-demand node to launch
+func (p *DefaultProvider) isCapacityReservationLaunch(nodeClaim *corev1beta1.NodeClaim, instanceTypes []*cloudprovider.InstanceType) bool {
+	requirements := scheduling.NewNodeSelectorRequirementsWithMinValues(nodeClaim.Spec.Requirements...)
+	// requirements must allow on-demand
+	if !requirements.Get(corev1beta1.CapacityTypeLabelKey).Has(corev1beta1.CapacityTypeOnDemand) {
+		return false
+	}
+
+	requirements[corev1beta1.CapacityTypeLabelKey] = scheduling.NewRequirement(corev1beta1.CapacityTypeLabelKey, v1.NodeSelectorOpIn, corev1beta1.CapacityTypeOnDemand)
+	requirements[v1beta1.LabelCapactiyReservationID] = scheduling.NewRequirement(v1beta1.LabelCapactiyReservationID, v1.NodeSelectorOpExists)
+	for _, instanceType := range instanceTypes {
+		for _, offering := range instanceType.Offerings {
+			if requirements.Compatible(offering.Requirements, scheduling.AllowUndefinedWellKnownLabels) == nil {
+				if offering.Requirements.Has(v1beta1.LabelCapactiyReservationID) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
 // filterUnwantedSpot is used to filter out spot types that are more expensive than the cheapest on-demand type that we
 // could launch during mixed capacity-type launches
 func filterUnwantedSpot(instanceTypes []*cloudprovider.InstanceType) []*cloudprovider.InstanceType {
@@ -446,6 +487,34 @@ func filterUnwantedSpot(instanceTypes []*cloudprovider.InstanceType) []*cloudpro
 			return false
 		}
 		return available.Cheapest().Price <= cheapestOnDemand
+	})
+	return instanceTypes
+}
+
+// filterOnlyCapacityReservations is used to filter only offerings that are capacity reservations
+func filterOnlyCapacityReservations(instanceTypes []*cloudprovider.InstanceType) []*cloudprovider.InstanceType {
+	// Filter out any types where the cheapest offering, which should be spot, is more expensive than the cheapest
+	// on-demand instance type that would have worked. This prevents us from getting a larger more-expensive spot
+	// instance type compared to the cheapest sufficiently large on-demand instance type
+	instanceTypes = lo.FilterMap(instanceTypes, func(item *cloudprovider.InstanceType, index int) (*cloudprovider.InstanceType, bool) {
+		available := lo.FilterMap(item.Offerings, func(offering cloudprovider.Offering, index int) (cloudprovider.Offering, bool) {
+			if !offering.Available {
+				return cloudprovider.Offering{}, false
+			}
+
+			if !offering.Requirements.Has(v1beta1.LabelCapactiyReservationID) {
+				return cloudprovider.Offering{}, false
+			}
+
+			return offering, true
+		})
+
+		if len(available) == 0 {
+			return nil, false
+		}
+		item.Offerings = available
+
+		return item, true
 	})
 	return instanceTypes
 }

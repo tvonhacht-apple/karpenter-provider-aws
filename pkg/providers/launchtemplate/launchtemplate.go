@@ -61,9 +61,10 @@ type Provider interface {
 }
 
 type LaunchTemplate struct {
-	Name          string
-	InstanceTypes []*cloudprovider.InstanceType
-	ImageID       string
+	Name                  string
+	InstanceTypes         []*cloudprovider.InstanceType
+	ImageID               string
+	CapacityReservationID *string
 }
 
 type DefaultProvider struct {
@@ -119,6 +120,8 @@ func (p *DefaultProvider) EnsureAll(ctx context.Context, nodeClass *v1beta1.EC2N
 	if err != nil {
 		return nil, err
 	}
+
+	log.FromContext(ctx).WithValues("instanceTypes", instanceTypes).V(0).Info("Ensure All")
 	resolvedLaunchTemplates, err := p.amiFamily.Resolve(nodeClass, nodeClaim, instanceTypes, capacityType, options)
 	if err != nil {
 		return nil, err
@@ -130,7 +133,15 @@ func (p *DefaultProvider) EnsureAll(ctx context.Context, nodeClass *v1beta1.EC2N
 		if err != nil {
 			return nil, err
 		}
-		launchTemplates = append(launchTemplates, &LaunchTemplate{Name: *ec2LaunchTemplate.LaunchTemplateName, InstanceTypes: resolvedLaunchTemplate.InstanceTypes, ImageID: resolvedLaunchTemplate.AMIID})
+		launchTemplates = append(
+			launchTemplates,
+			&LaunchTemplate{
+				Name:                  *ec2LaunchTemplate.LaunchTemplateName,
+				InstanceTypes:         resolvedLaunchTemplate.InstanceTypes,
+				ImageID:               resolvedLaunchTemplate.AMIID,
+				CapacityReservationID: resolvedLaunchTemplate.CapacityReservationID,
+			},
+		)
 	}
 	return launchTemplates, nil
 }
@@ -186,6 +197,7 @@ func (p *DefaultProvider) createAMIOptions(ctx context.Context, nodeClass *v1bet
 		KubeDNSIP:                p.KubeDNSIP,
 		AssociatePublicIPAddress: nodeClass.Spec.AssociatePublicIPAddress,
 		NodeClassName:            nodeClass.Name,
+		// tvonhacht: might wanna add CapacityReservations here
 	}, nil
 }
 
@@ -235,6 +247,7 @@ func (p *DefaultProvider) createLaunchTemplate(ctx context.Context, options *ami
 		launchTemplateDataTags = append(launchTemplateDataTags, &ec2.LaunchTemplateTagSpecificationRequest{ResourceType: aws.String(ec2.ResourceTypeSpotInstancesRequest), Tags: utils.MergeTags(options.Tags)})
 	}
 	networkInterfaces := p.generateNetworkInterfaces(options)
+	capacityReservationSpecification := p.generateCapacityReservationSpecification(options)
 	output, err := p.ec2api.CreateLaunchTemplateWithContext(ctx, &ec2.CreateLaunchTemplateInput{
 		LaunchTemplateName: aws.String(LaunchTemplateName(options)),
 		LaunchTemplateData: &ec2.RequestLaunchTemplateData{
@@ -255,8 +268,9 @@ func (p *DefaultProvider) createLaunchTemplate(ctx context.Context, options *ami
 				HttpPutResponseHopLimit: options.MetadataOptions.HTTPPutResponseHopLimit,
 				HttpTokens:              options.MetadataOptions.HTTPTokens,
 			},
-			NetworkInterfaces: networkInterfaces,
-			TagSpecifications: launchTemplateDataTags,
+			NetworkInterfaces:                networkInterfaces,
+			TagSpecifications:                launchTemplateDataTags,
+			CapacityReservationSpecification: capacityReservationSpecification,
 		},
 		TagSpecifications: []*ec2.TagSpecification{
 			{
@@ -299,6 +313,18 @@ func (p *DefaultProvider) generateNetworkInterfaces(options *amifamily.LaunchTem
 		}
 	}
 	return nil
+}
+
+func (p *DefaultProvider) generateCapacityReservationSpecification(options *amifamily.LaunchTemplate) *ec2.LaunchTemplateCapacityReservationSpecificationRequest {
+	if options.CapacityReservationID == nil {
+		return nil
+	}
+
+	return &ec2.LaunchTemplateCapacityReservationSpecificationRequest{
+		CapacityReservationTarget: &ec2.CapacityReservationTarget{
+			CapacityReservationId: options.CapacityReservationID,
+		},
+	}
 }
 
 func (p *DefaultProvider) blockDeviceMappings(blockDeviceMappings []*v1beta1.BlockDeviceMapping) []*ec2.LaunchTemplateBlockDeviceMappingRequest {

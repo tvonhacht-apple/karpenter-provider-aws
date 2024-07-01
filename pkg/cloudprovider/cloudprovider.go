@@ -77,6 +77,7 @@ func New(instanceTypeProvider instancetype.Provider, instanceProvider instance.P
 
 // Create a NodeClaim given the constraints.
 func (c *CloudProvider) Create(ctx context.Context, nodeClaim *corev1beta1.NodeClaim) (*corev1beta1.NodeClaim, error) {
+	log.FromContext(ctx).WithValues("nodeClaim", nodeClaim).V(0).Info("Create nodeClaim")
 	nodeClass, err := c.resolveNodeClassFromNodeClaim(ctx, nodeClaim)
 	if err != nil {
 		if errors.IsNotFound(err) {
@@ -103,6 +104,11 @@ func (c *CloudProvider) Create(ctx context.Context, nodeClaim *corev1beta1.NodeC
 	instanceType, _ := lo.Find(instanceTypes, func(i *cloudprovider.InstanceType) bool {
 		return i.Name == instance.Type
 	})
+	// TODO: tonvhacht maybe not needed because drift detection will add it, or a later refresh? if we do this maybe we should do this withn the Create before returning the object?
+	instance, err = c.instanceProvider.Get(ctx, instance.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting instance after creating, %w", err)
+	}
 	nc := c.instanceToNodeClaim(instance, instanceType, nodeClass)
 	nc.Annotations = lo.Assign(nodeClass.Annotations, map[string]string{
 		v1beta1.AnnotationEC2NodeClassHash:        nodeClass.Hash(),
@@ -208,6 +214,10 @@ func (c *CloudProvider) IsDrifted(ctx context.Context, nodeClaim *corev1beta1.No
 	driftReason, err := c.isNodeClassDrifted(ctx, nodeClaim, nodePool, nodeClass)
 	if err != nil {
 		return "", err
+	}
+	if driftReason == CapacityReservationDrift {
+		// Reconcile nodeClaim
+		return "", nil
 	}
 	return driftReason, nil
 }
@@ -348,6 +358,11 @@ func (c *CloudProvider) instanceToNodeClaim(i *instance.Instance, instanceType *
 	if v, ok := i.Tags[corev1beta1.ManagedByAnnotationKey]; ok {
 		annotations[corev1beta1.ManagedByAnnotationKey] = v
 	}
+
+	if i.CapacityReservationID != nil {
+		labels[v1beta1.LabelCapactiyReservationID] = *i.CapacityReservationID
+	}
+
 	nodeClaim.Labels = labels
 	nodeClaim.Annotations = annotations
 	nodeClaim.CreationTimestamp = metav1.Time{Time: i.LaunchTime}
@@ -357,6 +372,7 @@ func (c *CloudProvider) instanceToNodeClaim(i *instance.Instance, instanceType *
 	}
 	nodeClaim.Status.ProviderID = fmt.Sprintf("aws:///%s/%s", i.Zone, i.ID)
 	nodeClaim.Status.ImageID = i.ImageID
+
 	return nodeClaim
 }
 
